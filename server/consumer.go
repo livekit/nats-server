@@ -119,9 +119,10 @@ type SequenceInfo struct {
 }
 
 type CreateConsumerRequest struct {
-	Stream string         `json:"stream_name"`
-	Config ConsumerConfig `json:"config"`
-	Action ConsumerAction `json:"action"`
+	Stream   string         `json:"stream_name"`
+	Config   ConsumerConfig `json:"config"`
+	Action   ConsumerAction `json:"action"`
+	Pedantic bool           `json:"pedantic"`
 }
 
 type ConsumerAction int

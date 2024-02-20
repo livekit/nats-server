@@ -2549,7 +2549,9 @@ func (a *Account) addStreamTemplate(tc *StreamTemplateConfig) (*streamTemplate, 
 	// FIXME(dlc) - Hacky
 	tcopy := tc.deepCopy()
 	tcopy.Config.Name = "_"
-	cfg, apiErr := s.checkStreamCfg(tcopy.Config, a)
+	// FUXME(jrm): Make sure that we are not using templates anymore and we can
+	// safely skip making pedantic work with them.
+	cfg, apiErr := s.checkStreamCfg(tcopy.Config, a, false)
 	if apiErr != nil {
 		return nil, apiErr
 	}

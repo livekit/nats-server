@@ -3713,7 +3713,8 @@ func (js *jetStream) processClusterCreateStream(acc *Account, sa *streamAssignme
 			}
 		} else if err == NewJSStreamNotFoundError() {
 			// Add in the stream here.
-			mset, err = acc.addStreamWithAssignment(sa.Config, nil, sa)
+			// TODO(jrm): Can we ignore the pedantic mode on commited assignments?
+			mset, err = acc.addStreamWithAssignment(sa.Config, nil, sa, false)
 		}
 		if mset != nil {
 			mset.setCreatedTime(sa.Created)
@@ -5918,7 +5919,7 @@ func (js *jetStream) jsClusteredStreamLimitsCheck(acc *Account, cfg *StreamConfi
 	return nil
 }
 
-func (s *Server) jsClusteredStreamRequest(ci *ClientInfo, acc *Account, subject, reply string, rmsg []byte, config *StreamConfig) {
+func (s *Server) jsClusteredStreamRequest(ci *ClientInfo, acc *Account, subject, reply string, rmsg []byte, config *streamConfig) {
 	js, cc := s.getJetStreamCluster()
 	if js == nil || cc == nil {
 		return
@@ -5926,7 +5927,7 @@ func (s *Server) jsClusteredStreamRequest(ci *ClientInfo, acc *Account, subject,
 
 	var resp = JSApiStreamCreateResponse{ApiResponse: ApiResponse{Type: JSApiStreamCreateResponseType}}
 
-	ccfg, apiErr := s.checkStreamCfg(config, acc)
+	ccfg, apiErr := s.checkStreamCfg(&config.StreamConfig, acc, config.Pedantic)
 	if apiErr != nil {
 		resp.Error = apiErr
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))
@@ -6063,7 +6064,7 @@ func sysRequest[T any](s *Server, subjFormat string, args ...interface{}) (*T, e
 	}
 }
 
-func (s *Server) jsClusteredStreamUpdateRequest(ci *ClientInfo, acc *Account, subject, reply string, rmsg []byte, cfg *StreamConfig, peerSet []string) {
+func (s *Server) jsClusteredStreamUpdateRequest(ci *ClientInfo, acc *Account, subject, reply string, rmsg []byte, cfg *StreamConfig, peerSet []string, pedantic bool) {
 	js, cc := s.getJetStreamCluster()
 	if js == nil || cc == nil {
 		return
@@ -6089,7 +6090,7 @@ func (s *Server) jsClusteredStreamUpdateRequest(ci *ClientInfo, acc *Account, su
 	var newCfg *StreamConfig
 	if jsa := js.accounts[acc.Name]; jsa != nil {
 		js.mu.Unlock()
-		ncfg, err := jsa.configUpdateCheck(osa.Config, cfg, s)
+		ncfg, err := jsa.configUpdateCheck(osa.Config, cfg, s, pedantic)
 		js.mu.Lock()
 		if err != nil {
 			resp.Error = NewJSStreamUpdateError(err, Unless(err))
@@ -6190,6 +6191,8 @@ func (s *Server) jsClusteredStreamUpdateRequest(ci *ClientInfo, acc *Account, su
 		// We are adding new peers here.
 		if newCfg.Replicas > len(rg.Peers) {
 			// Check that we have the allocation available.
+			// TODO(jrm): Make sure we do not need pedantic mode info here.
+			// We should be fine, as this either errors or not, and we are not changing the stream.
 			if err := js.jsClusteredStreamLimitsCheck(acc, newCfg); err != nil {
 				resp.Error = err
 				s.sendAPIErrResponse(ci, acc, subject, reply, string(rmsg), s.jsonResponse(&resp))

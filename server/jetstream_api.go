@@ -1412,7 +1412,7 @@ func (s *Server) jsStreamCreateRequest(sub *subscription, c *client, _ *Account,
 		return
 	}
 
-	var cfg StreamConfig
+	var cfg streamConfig
 	if err := json.Unmarshal(msg, &cfg); err != nil {
 		resp.Error = NewJSInvalidJSONError()
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
@@ -1453,13 +1453,13 @@ func (s *Server) jsStreamCreateRequest(sub *subscription, c *client, _ *Account,
 		return
 	}
 
-	if err := acc.jsNonClusteredStreamLimitsCheck(&cfg); err != nil {
+	if err := acc.jsNonClusteredStreamLimitsCheck(&cfg.StreamConfig); err != nil {
 		resp.Error = err
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
 
-	mset, err := acc.addStream(&cfg)
+	mset, err := acc.addStreamPedantic(&cfg.StreamConfig, cfg.Pedantic)
 	if err != nil {
 		if IsNatsErr(err, JSStreamStoreFailedF) {
 			s.Warnf("Stream create failed for '%s > %s': %v", acc, streamName, err)
@@ -1519,14 +1519,14 @@ func (s *Server) jsStreamUpdateRequest(sub *subscription, c *client, _ *Account,
 		}
 		return
 	}
-	var ncfg StreamConfig
+	var ncfg streamConfig
 	if err := json.Unmarshal(msg, &ncfg); err != nil {
 		resp.Error = NewJSInvalidJSONError()
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
 		return
 	}
 
-	cfg, apiErr := s.checkStreamCfg(&ncfg, acc)
+	cfg, apiErr := s.checkStreamCfg(&ncfg.StreamConfig, acc, ncfg.Pedantic)
 	if apiErr != nil {
 		resp.Error = apiErr
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))
@@ -1543,7 +1543,7 @@ func (s *Server) jsStreamUpdateRequest(sub *subscription, c *client, _ *Account,
 	// Handle clustered version here.
 	if s.JetStreamIsClustered() {
 		// Always do in separate Go routine.
-		go s.jsClusteredStreamUpdateRequest(ci, acc, subject, reply, copyBytes(rmsg), &cfg, nil)
+		go s.jsClusteredStreamUpdateRequest(ci, acc, subject, reply, copyBytes(rmsg), &cfg, nil, ncfg.Pedantic)
 		return
 	}
 
@@ -2578,7 +2578,8 @@ func (s *Server) jsLeaderServerStreamMoveRequest(sub *subscription, c *client, _
 		streamName, accName, cfg.Replicas, s.peerSetToNames(currPeers), s.peerSetToNames(peers))
 
 	// We will always have peers and therefore never do a callout, therefore it is safe to call inline
-	s.jsClusteredStreamUpdateRequest(&ciNew, targetAcc.(*Account), subject, reply, rmsg, &cfg, peers)
+	// We should be fine ignoring pedantic mode here.
+	s.jsClusteredStreamUpdateRequest(&ciNew, targetAcc.(*Account), subject, reply, rmsg, &cfg, peers, false)
 }
 
 // Request to have the metaleader move a stream on a peer to another
@@ -2684,7 +2685,8 @@ func (s *Server) jsLeaderServerStreamCancelMoveRequest(sub *subscription, c *cli
 		cfg.Replicas, streamName, accName, s.peerSetToNames(currPeers), s.peerSetToNames(peers))
 
 	// We will always have peers and therefore never do a callout, therefore it is safe to call inline
-	s.jsClusteredStreamUpdateRequest(&ciNew, targetAcc.(*Account), subject, reply, rmsg, &cfg, peers)
+	// TODO(jrm): We should be fine ignoring pedantic mode here.
+	s.jsClusteredStreamUpdateRequest(&ciNew, targetAcc.(*Account), subject, reply, rmsg, &cfg, peers, false)
 }
 
 // Request to have an account purged
@@ -3362,7 +3364,7 @@ func (s *Server) jsStreamRestoreRequest(sub *subscription, c *client, _ *Account
 	}
 
 	// check stream config at the start of the restore process, not at the end
-	cfg, apiErr := s.checkStreamCfg(&req.Config, acc)
+	cfg, apiErr := s.checkStreamCfg(&req.Config, acc, false)
 	if apiErr != nil {
 		resp.Error = apiErr
 		s.sendAPIErrResponse(ci, acc, subject, reply, string(msg), s.jsonResponse(&resp))

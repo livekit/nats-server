@@ -36,6 +36,13 @@ import (
 	"github.com/nats-io/nuid"
 )
 
+type streamConfig struct {
+	StreamConfig
+	// This is not part of the StreamConfig, because its scoped to request,
+	// and not to the stream itself.
+	Pedantic bool `json:"pedantic,omitempty"`
+}
+
 // StreamConfig will determine the name, subjects and retention policy
 // for a given stream. If subjects is empty the name will be used.
 type StreamConfig struct {
@@ -380,15 +387,19 @@ const StreamMaxReplicas = 5
 
 // AddStream adds a stream for the given account.
 func (a *Account) addStream(config *StreamConfig) (*stream, error) {
-	return a.addStreamWithAssignment(config, nil, nil)
+	return a.addStreamWithAssignment(config, nil, nil, false)
 }
 
 // AddStreamWithStore adds a stream for the given account with custome store config options.
 func (a *Account) addStreamWithStore(config *StreamConfig, fsConfig *FileStoreConfig) (*stream, error) {
-	return a.addStreamWithAssignment(config, fsConfig, nil)
+	return a.addStreamWithAssignment(config, fsConfig, nil, false)
 }
 
-func (a *Account) addStreamWithAssignment(config *StreamConfig, fsConfig *FileStoreConfig, sa *streamAssignment) (*stream, error) {
+func (a *Account) addStreamPedantic(config *StreamConfig, pedantic bool) (*stream, error) {
+	return a.addStreamWithAssignment(config, nil, nil, true)
+}
+
+func (a *Account) addStreamWithAssignment(config *StreamConfig, fsConfig *FileStoreConfig, sa *streamAssignment, pedantic bool) (*stream, error) {
 	s, jsa, err := a.checkForJetStream()
 	if err != nil {
 		return nil, err
@@ -402,7 +413,7 @@ func (a *Account) addStreamWithAssignment(config *StreamConfig, fsConfig *FileSt
 	}
 
 	// Sensible defaults.
-	cfg, apiErr := s.checkStreamCfg(config, a)
+	cfg, apiErr := s.checkStreamCfg(config, a, pedantic)
 	if apiErr != nil {
 		return nil, apiErr
 	}
@@ -1145,7 +1156,7 @@ func (jsa *jsAccount) subjectsOverlap(subjects []string, self *stream) bool {
 // StreamDefaultDuplicatesWindow default duplicates window.
 const StreamDefaultDuplicatesWindow = 2 * time.Minute
 
-func (s *Server) checkStreamCfg(config *StreamConfig, acc *Account) (StreamConfig, *ApiError) {
+func (s *Server) checkStreamCfg(config *StreamConfig, acc *Account, pedantic bool) (StreamConfig, *ApiError) {
 	lim := &s.getOpts().JetStreamLimits
 
 	if config == nil {
@@ -1559,8 +1570,8 @@ func (mset *stream) fileStoreConfig() (FileStoreConfig, error) {
 }
 
 // Do not hold jsAccount or jetStream lock
-func (jsa *jsAccount) configUpdateCheck(old, new *StreamConfig, s *Server) (*StreamConfig, error) {
-	cfg, apiErr := s.checkStreamCfg(new, jsa.acc())
+func (jsa *jsAccount) configUpdateCheck(old, new *StreamConfig, s *Server, pedantic bool) (*StreamConfig, error) {
+	cfg, apiErr := s.checkStreamCfg(new, jsa.acc(), pedantic)
 	if apiErr != nil {
 		return nil, apiErr
 	}
@@ -1701,7 +1712,8 @@ func (mset *stream) updateWithAdvisory(config *StreamConfig, sendAdvisory bool) 
 	s := mset.srv
 	mset.mu.RUnlock()
 
-	cfg, err := mset.jsa.configUpdateCheck(&ocfg, config, s)
+	// TODO(jrm): I have a feeling that we are calling this method many times. Make sure its safe, as we do not have acces to the pedantic flag here.
+	cfg, err := mset.jsa.configUpdateCheck(&ocfg, config, s, false)
 	if err != nil {
 		return NewJSStreamInvalidConfigError(err, Unless(err))
 	}
@@ -5837,7 +5849,7 @@ func (a *Account) RestoreStream(ncfg *StreamConfig, r io.Reader) (*stream, error
 		return nil, err
 	}
 
-	cfg, apiErr := s.checkStreamCfg(ncfg, a)
+	cfg, apiErr := s.checkStreamCfg(ncfg, a, false)
 	if apiErr != nil {
 		return nil, apiErr
 	}
