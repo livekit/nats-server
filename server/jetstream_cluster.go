@@ -3713,7 +3713,7 @@ func (js *jetStream) processClusterCreateStream(acc *Account, sa *streamAssignme
 			}
 		} else if err == NewJSStreamNotFoundError() {
 			// Add in the stream here.
-			// TODO(jrm): Can we ignore the pedantic mode on commited assignments?
+			// TODO(jrm): Can we ignore the pedantic mode on committed assignments?
 			mset, err = acc.addStreamWithAssignment(sa.Config, nil, sa, false)
 		}
 		if mset != nil {
