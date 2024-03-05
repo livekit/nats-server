@@ -23123,3 +23123,22 @@ func TestJetStreamDirectGetMultiPaging(t *testing.T) {
 		processPartial(b + 1) // 100 + EOB
 	}
 }
+
+func TestJetStreamStreamPedanticMode(t *testing.T) {
+
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, _ := jsClientConnect(t, s)
+	defer nc.Close()
+
+	acc := s.GlobalAccount()
+	givenStreamConfig := StreamConfig{
+		Name:       "TEST",
+		MaxAge:     time.Minute,
+		Duplicates: time.Hour,
+	}
+	_, err := acc.addStreamPedantic(&givenStreamConfig, true)
+	require_Error(t, err)
+
+}

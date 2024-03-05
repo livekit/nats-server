@@ -396,7 +396,7 @@ func (a *Account) addStreamWithStore(config *StreamConfig, fsConfig *FileStoreCo
 }
 
 func (a *Account) addStreamPedantic(config *StreamConfig, pedantic bool) (*stream, error) {
-	return a.addStreamWithAssignment(config, nil, nil, true)
+	return a.addStreamWithAssignment(config, nil, nil, pedantic)
 }
 
 func (a *Account) addStreamWithAssignment(config *StreamConfig, fsConfig *FileStoreConfig, sa *streamAssignment, pedantic bool) (*stream, error) {
@@ -1590,6 +1590,7 @@ func (mset *stream) fileStoreConfig() (FileStoreConfig, error) {
 	return fs.fileStoreConfig(), nil
 }
 
+// TODO(jrm): check if this is all ok
 // Do not hold jsAccount or jetStream lock
 func (jsa *jsAccount) configUpdateCheck(old, new *StreamConfig, s *Server, pedantic bool) (*StreamConfig, error) {
 	cfg, apiErr := s.checkStreamCfg(new, jsa.acc(), pedantic)
@@ -1649,6 +1650,7 @@ func (jsa *jsAccount) configUpdateCheck(old, new *StreamConfig, s *Server, pedan
 		}
 	}
 
+	// TODO(jrm): Can w do those adjustments in pedantic mode?
 	// Do some adjustments for being sealed.
 	if cfg.Sealed {
 		cfg.MaxAge = 0
@@ -1722,6 +1724,7 @@ func (mset *stream) update(config *StreamConfig) error {
 }
 
 // Update will allow certain configuration properties of an existing stream to be updated.
+// TODO(jrm): add pedantic mode here
 func (mset *stream) updateWithAdvisory(config *StreamConfig, sendAdvisory bool) error {
 	_, jsa, err := mset.acc.checkForJetStream()
 	if err != nil {
