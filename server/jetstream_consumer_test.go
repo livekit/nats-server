@@ -474,7 +474,7 @@ func TestJetStreamConsumerActions(t *testing.T) {
 		AckPolicy:      AckExplicit,
 		DeliverPolicy:  DeliverAll,
 		AckWait:        time.Second * 30,
-	}, ActionCreate)
+	}, ActionCreate, false)
 	require_NoError(t, err)
 	// Create consumer again. Should be ok if action is CREATE but config is exactly the same.
 	_, err = mset.addConsumerWithAction(&ConsumerConfig{
@@ -483,7 +483,7 @@ func TestJetStreamConsumerActions(t *testing.T) {
 		AckPolicy:      AckExplicit,
 		DeliverPolicy:  DeliverAll,
 		AckWait:        time.Second * 30,
-	}, ActionCreate)
+	}, ActionCreate, false)
 	require_NoError(t, err)
 	// Create consumer again. Should error if action is CREATE.
 	_, err = mset.addConsumerWithAction(&ConsumerConfig{
@@ -492,7 +492,7 @@ func TestJetStreamConsumerActions(t *testing.T) {
 		AckPolicy:      AckExplicit,
 		DeliverPolicy:  DeliverAll,
 		AckWait:        time.Second * 30,
-	}, ActionCreate)
+	}, ActionCreate, false)
 	require_Error(t, err)
 
 	// Update existing consumer. Should be fine, as consumer exists.
@@ -502,7 +502,7 @@ func TestJetStreamConsumerActions(t *testing.T) {
 		AckPolicy:      AckExplicit,
 		DeliverPolicy:  DeliverAll,
 		AckWait:        time.Second * 30,
-	}, ActionUpdate)
+	}, ActionUpdate, false)
 	require_NoError(t, err)
 
 	// Update consumer. Should error, as this consumer does not exist.
@@ -512,7 +512,7 @@ func TestJetStreamConsumerActions(t *testing.T) {
 		AckPolicy:      AckExplicit,
 		DeliverPolicy:  DeliverAll,
 		AckWait:        time.Second * 30,
-	}, ActionUpdate)
+	}, ActionUpdate, false)
 	require_Error(t, err)
 
 	// Create new ephemeral. Should be fine as the consumer doesn't exist already
@@ -522,7 +522,7 @@ func TestJetStreamConsumerActions(t *testing.T) {
 		AckPolicy:      AckExplicit,
 		DeliverPolicy:  DeliverAll,
 		AckWait:        time.Second * 30,
-	}, ActionCreate)
+	}, ActionCreate, false)
 	require_NoError(t, err)
 
 	// Trying to create it again right away. Should error as it already exists (and hasn't been cleaned up yet)
@@ -532,7 +532,7 @@ func TestJetStreamConsumerActions(t *testing.T) {
 		AckPolicy:      AckExplicit,
 		DeliverPolicy:  DeliverAll,
 		AckWait:        time.Second * 30,
-	}, ActionCreate)
+	}, ActionCreate, false)
 	require_Error(t, err)
 }
 
@@ -555,21 +555,21 @@ func TestJetStreamConsumerActionsOnWorkQueuePolicyStream(t *testing.T) {
 		Durable:        "C1",
 		FilterSubjects: []string{"one", "two"},
 		AckPolicy:      AckExplicit,
-	}, ActionCreate)
+	}, ActionCreate, false)
 	require_NoError(t, err)
 
 	_, err = mset.addConsumerWithAction(&ConsumerConfig{
 		Durable:        "C2",
 		FilterSubjects: []string{"three", "four"},
 		AckPolicy:      AckExplicit,
-	}, ActionCreate)
+	}, ActionCreate, false)
 	require_NoError(t, err)
 
 	_, err = mset.addConsumerWithAction(&ConsumerConfig{
 		Durable:        "C3",
 		FilterSubjects: []string{"five.*"},
 		AckPolicy:      AckExplicit,
-	}, ActionCreate)
+	}, ActionCreate, false)
 	require_NoError(t, err)
 
 	// Updating a consumer by removing a previous subject filter.
@@ -577,7 +577,7 @@ func TestJetStreamConsumerActionsOnWorkQueuePolicyStream(t *testing.T) {
 		Durable:        "C1",
 		FilterSubjects: []string{"one"}, // Remove a subject.
 		AckPolicy:      AckExplicit,
-	}, ActionUpdate)
+	}, ActionUpdate, false)
 	require_NoError(t, err)
 
 	// Updating a consumer without overlapping subjects.
@@ -585,7 +585,7 @@ func TestJetStreamConsumerActionsOnWorkQueuePolicyStream(t *testing.T) {
 		Durable:        "C2",
 		FilterSubjects: []string{"three", "four", "two"}, // Add previously removed subject.
 		AckPolicy:      AckExplicit,
-	}, ActionUpdate)
+	}, ActionUpdate, false)
 	require_NoError(t, err)
 
 	// Creating a consumer with overlapping subjects should return an error.
@@ -593,7 +593,7 @@ func TestJetStreamConsumerActionsOnWorkQueuePolicyStream(t *testing.T) {
 		Durable:        "C4",
 		FilterSubjects: []string{"one", "two", "three", "four"},
 		AckPolicy:      AckExplicit,
-	}, ActionCreate)
+	}, ActionCreate, false)
 	require_Error(t, err)
 	if !IsNatsErr(err, JSConsumerWQConsumerNotUniqueErr) {
 		t.Errorf("want error %q, got %q", ApiErrors[JSConsumerWQConsumerNotUniqueErr], err)
@@ -604,7 +604,7 @@ func TestJetStreamConsumerActionsOnWorkQueuePolicyStream(t *testing.T) {
 		Durable:        "C3",
 		FilterSubjects: []string{"one", "two", "three", "four"},
 		AckPolicy:      AckExplicit,
-	}, ActionUpdate)
+	}, ActionUpdate, false)
 	require_Error(t, err)
 	if !IsNatsErr(err, JSConsumerWQConsumerNotUniqueErr) {
 		t.Errorf("want error %q, got %q", ApiErrors[JSConsumerWQConsumerNotUniqueErr], err)

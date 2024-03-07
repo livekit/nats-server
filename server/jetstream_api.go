@@ -3997,9 +3997,9 @@ func (s *Server) jsConsumerCreateRequest(sub *subscription, c *client, a *Accoun
 		// during this call, so place in Go routine to not block client.
 		// Router and Gateway API calls already in separate context.
 		if c.kind != ROUTER && c.kind != GATEWAY {
-			go s.jsClusteredConsumerRequest(ci, acc, subject, reply, rmsg, req.Stream, &req.Config, req.Action)
+			go s.jsClusteredConsumerRequest(ci, acc, subject, reply, rmsg, req.Stream, &req.Config, req.Action, req.Pedantic)
 		} else {
-			s.jsClusteredConsumerRequest(ci, acc, subject, reply, rmsg, req.Stream, &req.Config, req.Action)
+			s.jsClusteredConsumerRequest(ci, acc, subject, reply, rmsg, req.Stream, &req.Config, req.Action, req.Pedantic)
 		}
 		return
 	}
@@ -4024,7 +4024,7 @@ func (s *Server) jsConsumerCreateRequest(sub *subscription, c *client, a *Accoun
 		req.Config.PauseUntil = o.cfg.PauseUntil
 	}
 
-	o, err := stream.addConsumerWithAction(&req.Config, req.Action)
+	o, err := stream.addConsumerWithAction(&req.Config, req.Action, req.Pedantic)
 
 	if err != nil {
 		if IsNatsErr(err, JSConsumerStoreFailedErrF) {
