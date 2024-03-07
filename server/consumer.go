@@ -454,14 +454,15 @@ func setConsumerConfigDefaults(config *ConsumerConfig, streamCfg *StreamConfig, 
 		config.MaxDeliver = -1
 	}
 	// If BackOff was specified that will override the AckWait and the MaxDeliver.
-	if len(config.BackOff) > 0 {
+	if len(config.BackOff) > 0 && !pedantic {
 		config.AckWait = config.BackOff[0]
 	}
 	if config.MaxAckPending == 0 {
 		// we are pedantic mode and have limits set on stream
 		if !pedantic && (streamCfg.ConsumerLimits.MaxAckPending != 0) {
 			config.MaxAckPending = streamCfg.ConsumerLimits.MaxAckPending
-		} else {
+		}
+		if pedantic {
 			config.MaxAckPending = JsDefaultMaxAckPending
 		}
 	}
