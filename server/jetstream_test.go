@@ -23125,14 +23125,34 @@ func TestJetStreamDirectGetMultiPaging(t *testing.T) {
 }
 
 func TestJetStreamStreamPedanticMode(t *testing.T) {
-
-	s := RunBasicJetStreamServer(t)
+	cfgFmt := []byte(fmt.Sprintf(`
+        jetstream: {
+            enabled: true
+            max_file_store: 100MB
+            store_dir: %s
+            limits: {duplicate_window: "1m", max_request_batch: 250}
+        }
+        accounts: {
+            myacc: {
+                jetstream: enabled
+                users: [ { user: user, password: pass  } ]
+            }
+        }
+        no_auth_user: user
+	`, t.TempDir()))
+	conf := createConfFile(t, cfgFmt)
+	s, _ := RunServerWithConfig(conf)
 	defer s.Shutdown()
 
-	nc, _ := jsClientConnect(t, s)
+	nc, js := jsClientConnect(t, s)
 	defer nc.Close()
 
-	acc := s.GlobalAccount()
+	a, ok := s.accounts.Load("myacc")
+	if !ok {
+		t.Fatalf("Account not found")
+	}
+	acc := a.(*Account)
+
 	givenStreamConfig := StreamConfig{
 		Name:       "TEST",
 		MaxAge:     time.Minute,
@@ -23141,4 +23161,22 @@ func TestJetStreamStreamPedanticMode(t *testing.T) {
 	_, err := acc.addStreamPedantic(&givenStreamConfig, true)
 	require_Error(t, err)
 
+	givenStreamConfig = StreamConfig{
+		Name:       "TEST",
+		MaxAge:     time.Hour * 60,
+		Duplicates: time.Hour,
+	}
+	_, err = acc.addStreamPedantic(&givenStreamConfig, true)
+	require_Error(t, err)
+
+	givenStreamConfig = StreamConfig{
+		Name:       "TEST",
+		MaxAge:     time.Hour * 60,
+		Duplicates: time.Second * 30,
+	}
+	_, err = acc.addStreamPedantic(&givenStreamConfig, true)
+	require_NoError(t, err)
+
+	_, err = js.StreamInfo("TEST")
+	require_NoError(t, err)
 }
