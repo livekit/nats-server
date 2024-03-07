@@ -1721,12 +1721,16 @@ func (jsa *jsAccount) configUpdateCheck(old, new *StreamConfig, s *Server, pedan
 
 // Update will allow certain configuration properties of an existing stream to be updated.
 func (mset *stream) update(config *StreamConfig) error {
-	return mset.updateWithAdvisory(config, true)
+	return mset.updateWithAdvisory(config, true, false)
+}
+
+func (mset *stream) updatePedantic(config *StreamConfig, pedantic bool) error {
+	return mset.updateWithAdvisory(config, true, pedantic)
 }
 
 // Update will allow certain configuration properties of an existing stream to be updated.
 // TODO(jrm): add pedantic mode here
-func (mset *stream) updateWithAdvisory(config *StreamConfig, sendAdvisory bool) error {
+func (mset *stream) updateWithAdvisory(config *StreamConfig, sendAdvisory bool, pedantic bool) error {
 	_, jsa, err := mset.acc.checkForJetStream()
 	if err != nil {
 		return err

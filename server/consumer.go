@@ -470,7 +470,6 @@ func setConsumerConfigDefaults(config *ConsumerConfig, streamCfg *StreamConfig, 
 		config.InactiveThreshold = streamCfg.ConsumerLimits.InactiveThreshold
 	}
 	// Set proper default for max ack pending if we are ack explicit and none has been set.
-	// TODO(jrm): We seem to not check limits here if max ack pending is not set.
 	if (config.AckPolicy == AckExplicit || config.AckPolicy == AckAll) && config.MaxAckPending == 0 {
 		accPending := JsDefaultMaxAckPending
 		if lim.MaxAckPending > 0 && lim.MaxAckPending < accPending {
