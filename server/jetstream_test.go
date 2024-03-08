@@ -23174,9 +23174,18 @@ func TestJetStreamStreamPedanticMode(t *testing.T) {
 		MaxAge:     time.Hour * 60,
 		Duplicates: time.Second * 30,
 	}
-	_, err = acc.addStreamPedantic(&givenStreamConfig, true)
+	mset, err := acc.addStreamPedantic(&givenStreamConfig, true)
 	require_NoError(t, err)
 
 	_, err = js.StreamInfo("TEST")
 	require_NoError(t, err)
+
+	givenConfig := StreamConfig{
+		Name:       "TEST",
+		MaxAge:     time.Minute,
+		Duplicates: time.Hour,
+	}
+	err = mset.updateWithAdvisory(&givenConfig, false, true)
+	require_Error(t, err)
+
 }
