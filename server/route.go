@@ -1452,6 +1452,11 @@ func (c *client) processRemoteUnsub(arg []byte, leafUnsub bool) (err error) {
 		return nil
 	}
 
+	// Keep the sublist removal and its announcement together with respect to
+	// a concurrent initLeafNodeSmapAndSendSubs snapshot. See Account.smapMu.
+	acc.smapMu.RLock()
+	defer acc.smapMu.RUnlock()
+
 	c.mu.Lock()
 	if c.isClosed() {
 		c.mu.Unlock()

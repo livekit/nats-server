@@ -2626,6 +2626,12 @@ func (s *Server) initLeafNodeSmapAndSendSubs(c *client) {
 	subs := _subs[:0]
 	ims := []string{}
 
+	// Block interest removals for the duration of the snapshot so that the
+	// sublist we read and the deltas the new leaf will receive are ordered
+	// consistently. See Account.smapMu.
+	acc.smapMu.Lock()
+	defer acc.smapMu.Unlock()
+
 	// Hold the client lock otherwise there can be a race and miss some subs.
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -3302,6 +3308,9 @@ func (c *client) processLeafUnsub(arg []byte) error {
 	}
 	c.mu.Unlock()
 
+	// Keep the sublist removal and its announcement together with respect to
+	// a concurrent initLeafNodeSmapAndSendSubs snapshot. See Account.smapMu.
+	acc.smapMu.RLock()
 	c.unsubscribe(acc, sub, true, true)
 	if !spoke {
 		// If we are routing subtract from the route map for the associated account.
@@ -3313,6 +3322,7 @@ func (c *client) processLeafUnsub(arg []byte) error {
 	}
 	// Now check on leafnode updates for other leaf nodes.
 	acc.updateLeafNodes(sub, -delta)
+	acc.smapMu.RUnlock()
 	return nil
 }
 

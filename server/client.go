@@ -3631,6 +3631,10 @@ func (c *client) processUnsub(arg []byte) error {
 	}
 
 	if unsub {
+		// Keep the sublist removal and its announcement together with respect
+		// to a concurrent initLeafNodeSmapAndSendSubs snapshot. See
+		// Account.smapMu.
+		acc.smapMu.RLock()
 		c.unsubscribe(acc, sub, false, true)
 		if acc != nil && (kind == CLIENT || kind == SYSTEM || kind == ACCOUNT || kind == JETSTREAM) {
 			srv.updateRouteSubscriptionMap(acc, sub, -1)
@@ -3640,6 +3644,7 @@ func (c *client) processUnsub(arg []byte) error {
 		}
 		// Now check on leafnode updates.
 		acc.updateLeafNodes(sub, -1)
+		acc.smapMu.RUnlock()
 	}
 
 	return nil
@@ -6488,6 +6493,11 @@ func (c *client) clearAccountSubs(close bool) {
 	spoke := c.isSpokeLeafNode()
 	c.mu.Unlock()
 
+	// Keep the batch removal and the deltas that follow together with respect
+	// to a concurrent initLeafNodeSmapAndSendSubs snapshot: a snapshot taken
+	// between them would not count these subscriptions yet would still apply
+	// their deltas. See Account.smapMu.
+	acc.smapMu.RLock()
 	acc.sl.RemoveBatch(subs)
 
 	if srv != nil {
@@ -6531,6 +6541,7 @@ func (c *client) clearAccountSubs(close bool) {
 			acc.updateLeafNodes(esub.sub, -esub.n)
 		}
 	}
+	acc.smapMu.RUnlock()
 
 	if !close {
 		// Register back to global account, mimicking the state after client initialization.
