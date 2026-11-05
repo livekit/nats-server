@@ -94,7 +94,7 @@ type leaf struct {
 	// when processing CONNECT, initLeafNodeSmapAndSendSubs is invoked and add
 	// this subscription to smap. When processing of the sub then calls updateSmap,
 	// we would add it a second time in the smap causing later unsub to suppress the LS-.
-	tsub  map[*subscription]struct{}
+	tsub  map[*subscription]int64
 	tsubt *time.Timer
 	// This map tracks the account mapping sources that this connection has
 	// announced in smap. It makes forceAddToSmap/forceRemoveFromSmap idempotent
@@ -2747,9 +2747,9 @@ func (s *Server) initLeafNodeSmapAndSendSubs(c *client) {
 			}
 			c.leaf.smap[keyFromSub(sub)] += count
 			if c.leaf.tsub == nil {
-				c.leaf.tsub = make(map[*subscription]struct{})
+				c.leaf.tsub = make(map[*subscription]int64)
 			}
-			c.leaf.tsub[sub] = struct{}{}
+			c.leaf.tsub[sub] = count
 		}
 	}
 	// FIXME(dlc) - We need to update appropriately on an account claims update.
@@ -2818,6 +2818,18 @@ func (s *Server) updateInterestForAccountOnGateway(accName string, sub *subscrip
 // If `hubOnly` is true, then will update only leaf nodes that connect to this server
 // (that is, for which this server acts as a hub to them).
 func (acc *Account) updateLeafNodesEx(sub *subscription, delta int32, hubOnly bool) {
+	acc.updateLeafNodesMode(sub, delta, hubOnly, false)
+}
+
+// updateLeafNodesForWeight is used when the weight of an existing queue
+// subscription changed. The stored subscription's new weight is already
+// visible to the init snapshot, so the delta may have to be recomputed
+// against the weight that the snapshot counted.
+func (acc *Account) updateLeafNodesForWeight(sub *subscription, delta int32) {
+	acc.updateLeafNodesMode(sub, delta, false, true)
+}
+
+func (acc *Account) updateLeafNodesMode(sub *subscription, delta int32, hubOnly, reconcile bool) {
 	if acc == nil || sub == nil {
 		return
 	}
@@ -2898,7 +2910,7 @@ func (acc *Account) updateLeafNodesEx(sub *subscription, delta int32, hubOnly bo
 			// can change, and to initializes mperms for wildcard subscriptions
 			// that collide with deny rules.
 			if isLDS || delta <= 0 || ln.canSubscribe(subject) {
-				ln.updateSmap(sub, delta, isLDS)
+				ln.updateSmap(sub, delta, isLDS, reconcile)
 			}
 			ln.mu.Unlock()
 		}
@@ -2914,7 +2926,7 @@ func (acc *Account) updateLeafNodes(sub *subscription, delta int32) {
 // This will make an update to our internal smap and determine if we should send out
 // an interest update to the remote side.
 // Lock should be held.
-func (c *client) updateSmap(sub *subscription, delta int32, isLDS bool) {
+func (c *client) updateSmap(sub *subscription, delta int32, isLDS, reconcile bool) {
 	if c.leaf.smap == nil {
 		return
 	}
@@ -2927,15 +2939,29 @@ func (c *client) updateSmap(sub *subscription, delta int32, isLDS bool) {
 	}
 
 	// For additions, check if that sub has just been processed during initLeafNodeSmapAndSendSubs
-	if delta > 0 && c.leaf.tsub != nil {
-		if _, present := c.leaf.tsub[sub]; present {
+	if c.leaf.tsub != nil {
+		if counted, present := c.leaf.tsub[sub]; present && (delta > 0 || (reconcile && sub.queue != nil)) {
 			delete(c.leaf.tsub, sub)
 			if len(c.leaf.tsub) == 0 {
 				c.leaf.tsub = nil
-				c.leaf.tsubt.Stop()
-				c.leaf.tsubt = nil
+				if c.leaf.tsubt != nil {
+					c.leaf.tsubt.Stop()
+					c.leaf.tsubt = nil
+				}
 			}
-			return
+			if reconcile && sub.queue != nil {
+				// The snapshot counted `counted` for this queue sub, but the
+				// caller's delta is relative to the previous weight. The new
+				// weight is already stored, so bring the announced count from
+				// `counted` to the current weight. This also covers the case
+				// where the snapshot already saw the new weight: the delta is 0.
+				delta = int32(int64(atomic.LoadInt32(&sub.qw)) - counted)
+				if delta == 0 {
+					return
+				}
+			} else {
+				return
+			}
 		}
 	}
 
@@ -3233,6 +3259,7 @@ func (c *client) processLeafSub(argo []byte) (err error) {
 	}
 	key := bytesToString(sub.sid)
 	osub := c.subs[key]
+	var qwSub *subscription
 	if osub == nil {
 		c.subs[key] = sub
 		// Now place into the account sl.
@@ -3248,6 +3275,7 @@ func (c *client) processLeafSub(argo []byte) (err error) {
 		delta = sub.qw - atomic.LoadInt32(&osub.qw)
 		atomic.StoreInt32(&osub.qw, sub.qw)
 		acc.sl.UpdateRemoteQSub(osub)
+		qwSub = osub
 	}
 	spoke := c.isSpokeLeafNode()
 	c.mu.Unlock()
@@ -3271,7 +3299,11 @@ func (c *client) processLeafSub(argo []byte) (err error) {
 	}
 	// Now check on leafnode updates for other leaf nodes. We understand solicited
 	// and non-solicited state in this call so we will do the right thing.
-	acc.updateLeafNodes(sub, delta)
+	if qwSub != nil {
+		acc.updateLeafNodesForWeight(qwSub, delta)
+	} else {
+		acc.updateLeafNodes(sub, delta)
+	}
 
 	return nil
 }
