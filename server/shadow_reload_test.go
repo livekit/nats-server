@@ -175,3 +175,85 @@ func TestStreamImportReloadRemovesQueueInterest(t *testing.T) {
 		t.Fatalf("Ghost queue route interest for %q after unsub: rm=%d lws=%d", key, n, w)
 	}
 }
+
+// Peer-visible form: the route peer must drop its remote interest for the
+// exported subject once the import is removed on the importing server.
+func TestStreamImportReloadWithdrawsPeerInterest(t *testing.T) {
+	s1, _, confFile := runReloadServerWithContent(t, []byte(shadowReloadConf))
+	defer s1.Shutdown()
+	cport := s1.ClusterAddr().Port
+
+	conf2 := fmt.Sprintf(`
+		port: -1
+		cluster {
+			name: "A"
+			listen: "127.0.0.1:-1"
+			routes: ["nats-route://127.0.0.1:%d"]
+		}
+		accounts {
+			EA {
+				users: [{user: a, password: pwd}]
+				exports: [{stream: "foo.>"}]
+			}
+			IB {
+				users: [{user: b, password: pwd}]
+				imports: [{stream: {account: EA, subject: "foo.>"}, prefix: "import"}]
+			}
+		}
+	`, cport)
+	s2, _ := RunServerWithConfig(createConfFile(t, []byte(conf2)))
+	defer s2.Shutdown()
+
+	checkFor(t, 3*time.Second, 15*time.Millisecond, func() error {
+		if s1.numRoutes() == 0 || s2.numRoutes() == 0 {
+			return fmt.Errorf("routes not up: s1=%d s2=%d", s1.numRoutes(), s2.numRoutes())
+		}
+		return nil
+	})
+
+	nc := natsConnect(t, s1.ClientURL(), nats.UserInfo("b", "pwd"))
+	defer nc.Close()
+	natsSubSync(t, nc, "import.foo.bar")
+	natsFlush(t, nc)
+
+	ea2, err := s2.LookupAccount("EA")
+	if err != nil {
+		t.Fatalf("Error looking up account: %v", err)
+	}
+	checkFor(t, 3*time.Second, 15*time.Millisecond, func() error {
+		if len(ea2.sl.Match("foo.bar").psubs) == 0 {
+			return fmt.Errorf("peer has no interest yet")
+		}
+		return nil
+	})
+
+	confReload := fmt.Sprintf(`
+		port: -1
+		cluster {
+			name: "A"
+			listen: "127.0.0.1:%d"
+		}
+		accounts {
+			EA {
+				users: [{user: a, password: pwd}]
+				exports: [{stream: "foo.>"}]
+			}
+			IB {
+				users: [{user: b, password: pwd}]
+			}
+		}
+	`, cport)
+	if err := os.WriteFile(confFile, []byte(confReload), 0666); err != nil {
+		t.Fatalf("Error rewriting conf: %v", err)
+	}
+	if err := s1.Reload(); err != nil {
+		t.Fatalf("Error on reload: %v", err)
+	}
+
+	checkFor(t, 2*time.Second, 15*time.Millisecond, func() error {
+		if n := len(ea2.sl.Match("foo.bar").psubs); n != 0 {
+			return fmt.Errorf("peer still has %d interest sub(s) for foo.bar", n)
+		}
+		return nil
+	})
+}
