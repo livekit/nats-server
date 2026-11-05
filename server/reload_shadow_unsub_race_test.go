@@ -85,7 +85,10 @@ func TestStreamImportRefreshLosesRaceWithUnsubscribe(t *testing.T) {
 	var c *client
 	impAcc.mu.RLock()
 	for cl := range impAcc.clients {
-		if cl.kind == CLIENT && !cl.isClosed() {
+		cl.mu.Lock()
+		live := cl.kind == CLIENT && !cl.isClosed()
+		cl.mu.Unlock()
+		if live {
 			c = cl
 		}
 	}
@@ -152,29 +155,31 @@ func TestStreamImportRefreshLosesRaceWithUnsubscribe(t *testing.T) {
 	<-refreshed
 	require_NoError(t, nc.Flush())
 
+	// The refresh must not leave a shadow (or its route interest) behind for
+	// the subscription that was unsubscribed in the window.
 	expSubs := shadowSnapshot(expAcc, "foo.bar")
-	if len(expSubs) == 0 {
-		t.Fatalf("no shadow sub left in EXP: the refresh did not leak one")
-	}
+	key := keyFromSubWithOrigin(&subscription{subject: []byte("foo.bar")})
+	expAcc.mu.RLock()
+	rm, lws := expAcc.rm[key], expAcc.lws[key]
+	expAcc.mu.RUnlock()
+	t.Logf("after the parked refresh: EXP shadows=%d rm[%q]=%d lws=%d", len(expSubs), key, rm, lws)
 	for _, shadow := range expSubs {
-		key := keyFromSubWithOrigin(shadow)
-		expAcc.mu.RLock()
-		rm, lws := expAcc.rm[key], expAcc.lws[key]
-		expAcc.mu.RUnlock()
-		t.Logf("leaked shadow: sid=%q subject=%q closed=%v rm=%d lws=%d",
-			shadow.sid, shadow.subject, shadow.isClosed(), rm, lws)
-		if rm == 0 {
-			t.Fatalf("leaked shadow %q has no route interest", key)
-		}
+		t.Logf("shadow for dead sid: sid=%q subject=%q closed=%v",
+			shadow.sid, shadow.subject, shadow.isClosed())
 	}
-	t.Fatalf("exporting account still has %d shadow sub(s) for a dead sid", len(expSubs))
+	if len(expSubs) != 0 {
+		t.Fatalf("exporting account still has %d shadow sub(s) for a dead sid", len(expSubs))
+	}
+	if rm != 0 || lws != 0 {
+		t.Fatalf("exporting account still announces interest for a dead sid: rm=%d lws=%d", rm, lws)
+	}
 
-	// Unreachable while the leak exists; keep the permanence oracle for the
-	// fixed build.
+	// And the permanence oracle: after the client closes there must be no
+	// shadow left for it either.
 	nc.Close()
 	checkFor(t, 2*time.Second, 10*time.Millisecond, func() error {
-		if n := expAcc.TotalSubs(); n != 0 {
-			return fmt.Errorf("EXP still has %d subs after the subscriber closed", n)
+		if n := len(shadowSnapshot(expAcc, "foo.bar")); n != 0 {
+			return fmt.Errorf("EXP still has %d shadow(s) after the subscriber closed", n)
 		}
 		return nil
 	})
