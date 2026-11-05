@@ -3367,6 +3367,17 @@ func (c *client) addShadowSubscriptions(acc *Account, sub *subscription) error {
 	return nil
 }
 
+// shadowWeight returns the interest delta a subscription contributes to the
+// route, gateway and leafnode maps. For a queue subscription it is the
+// aggregated queue weight (1 for a client sub, N for a leaf sub that
+// represents N members), otherwise 1.
+func shadowWeight(sub *subscription) int32 {
+	if sub.queue != nil && sub.qw > 1 {
+		return sub.qw
+	}
+	return 1
+}
+
 // Add in the shadow subscription.
 func (c *client) addShadowSub(sub *subscription, ime *ime) (*subscription, error) {
 	c.mu.Lock()
@@ -3408,15 +3419,16 @@ func (c *client) addShadowSub(sub *subscription, ime *ime) (*subscription, error
 	}
 
 	// Update our route map here. But only if we are not a leaf node or a hub leafnode.
+	w := shadowWeight(&nsub)
 	if c.kind != LEAF || c.isHubLeafNode() {
-		c.srv.updateRemoteSubscription(im.acc, &nsub, 1)
+		c.srv.updateRemoteSubscription(im.acc, &nsub, w)
 	} else if c.kind == LEAF {
 		// Update all leafnodes that connect to this server. Note that we could have
 		// used the updateLeafNodes() function since when it does invoke updateSmap()
 		// this function already takes care of not sending to a spoke leafnode since
 		// the `nsub` here is already from a spoke leafnode, but to be explicit, we
 		// use this version that updates only leafnodes that connect to this server.
-		im.acc.updateLeafNodesEx(&nsub, 1, true)
+		im.acc.updateLeafNodesEx(&nsub, w, true)
 	}
 
 	return &nsub, nil
@@ -3570,10 +3582,11 @@ func (c *client) unsubscribe(acc *Account, sub *subscription, force, remove bool
 		if err := nsub.im.acc.sl.Remove(nsub); err != nil {
 			c.Debugf("Could not remove shadow import subscription for account %q", nsub.im.acc.Name)
 		}
+		w := shadowWeight(nsub)
 		if updateRoute {
-			c.srv.updateRemoteSubscription(nsub.im.acc, nsub, -1)
+			c.srv.updateRemoteSubscription(nsub.im.acc, nsub, -w)
 		} else if isSpokeLeaf {
-			nsub.im.acc.updateLeafNodesEx(nsub, -1, true)
+			nsub.im.acc.updateLeafNodesEx(nsub, -w, true)
 		}
 	}
 

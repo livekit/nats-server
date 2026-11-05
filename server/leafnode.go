@@ -3205,6 +3205,7 @@ func (c *client) processLeafSub(argo []byte) (err error) {
 	}
 	key := bytesToString(sub.sid)
 	osub := c.subs[key]
+	var shadows []*subscription
 	if osub == nil {
 		c.subs[key] = sub
 		// Now place into the account sl.
@@ -3220,6 +3221,9 @@ func (c *client) processLeafSub(argo []byte) (err error) {
 		delta = sub.qw - atomic.LoadInt32(&osub.qw)
 		atomic.StoreInt32(&osub.qw, sub.qw)
 		acc.sl.UpdateRemoteQSub(osub)
+		// Stream-import shadows are copies of this subscription in the
+		// exporting accounts; they must follow the same weight.
+		shadows = osub.shadow
 	}
 	spoke := c.isSpokeLeafNode()
 	c.mu.Unlock()
@@ -3228,6 +3232,20 @@ func (c *client) processLeafSub(argo []byte) (err error) {
 	if osub == nil {
 		if err := c.addShadowSubscriptions(acc, sub); err != nil {
 			c.Errorf(err.Error())
+		}
+	} else if len(shadows) > 0 {
+		for _, sh := range shadows {
+			sd := sub.qw - atomic.LoadInt32(&sh.qw)
+			if sd == 0 {
+				continue
+			}
+			atomic.StoreInt32(&sh.qw, sub.qw)
+			sh.im.acc.sl.UpdateRemoteQSub(sh)
+			if !spoke {
+				srv.updateRemoteSubscription(sh.im.acc, sh, sd)
+			} else {
+				sh.im.acc.updateLeafNodesEx(sh, sd, true)
+			}
 		}
 	}
 
