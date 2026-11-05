@@ -63,8 +63,8 @@ func TestOverlappingStreamImportsDeliverDuplicates(t *testing.T) {
 
 	key := keyFromSubWithOrigin(&subscription{subject: []byte("foo.bar")})
 	checkFor(t, 2*time.Second, 10*time.Millisecond, func() error {
-		if n := len(overlapSubs(expAcc, "foo.bar")); n != 2 {
-			return fmt.Errorf("EXP has %d shadow(s) for foo.bar, want 2", n)
+		if n := len(overlapSubs(expAcc, "foo.bar")); n == 0 {
+			return fmt.Errorf("EXP has no shadow for foo.bar")
 		}
 		return nil
 	})
@@ -72,8 +72,7 @@ func TestOverlappingStreamImportsDeliverDuplicates(t *testing.T) {
 	expAcc.mu.RLock()
 	rm := expAcc.rm[key]
 	expAcc.mu.RUnlock()
-	t.Logf("EXP shadows=%d (sid %q/%q) rm[%q]=%d",
-		len(shadows), shadows[0].sid, shadows[1].sid, key, rm)
+	t.Logf("EXP shadows=%d (sid %q) rm[%q]=%d", len(shadows), shadows[0].sid, key, rm)
 
 	ncExp := natsConnect(t, s.ClientURL(), nats.UserInfo("exp", "pwd"))
 	defer ncExp.Close()
@@ -90,6 +89,9 @@ func TestOverlappingStreamImportsDeliverDuplicates(t *testing.T) {
 	t.Logf("subscriber received %d copy(ies) of one publish; EXP rm[%q]=%d", got, key, rm)
 
 	var problems []string
+	if len(shadows) != 1 {
+		problems = append(problems, fmt.Sprintf("EXP has %d shadow(s) for one subscriber, want 1", len(shadows)))
+	}
 	if got != 1 {
 		problems = append(problems, fmt.Sprintf("subscriber received %d copies of one publish, want 1", got))
 	}
@@ -139,17 +141,18 @@ func TestOverlappingStreamImportsInflateQueueWeight(t *testing.T) {
 
 	key := keyFromSubWithOrigin(&subscription{subject: []byte("foo.bar"), queue: []byte("q")})
 	checkFor(t, 2*time.Second, 10*time.Millisecond, func() error {
-		if n := len(overlapSubs(expAcc, "foo.bar")); n != 2 {
-			return fmt.Errorf("EXP has %d shadow(s) for foo.bar, want 2", n)
+		if n := len(overlapSubs(expAcc, "foo.bar")); n == 0 {
+			return fmt.Errorf("EXP has no shadow for foo.bar")
 		}
 		return nil
 	})
+	nshadows := len(overlapSubs(expAcc, "foo.bar"))
 	expAcc.mu.RLock()
 	rm := expAcc.rm[key]
 	expAcc.mu.RUnlock()
-	t.Logf("EXP queue shadows=2 rm[%q]=%d", key, rm)
-	if rm != 1 {
-		t.Fatalf("EXP queue weight for a one-member group is %d, want 1", rm)
+	t.Logf("EXP queue shadows=%d rm[%q]=%d", nshadows, key, rm)
+	if nshadows != 1 || rm != 1 {
+		t.Fatalf("one-member queue group: shadows=%d weight=%d, want 1/1", nshadows, rm)
 	}
 }
 
