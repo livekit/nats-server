@@ -156,6 +156,67 @@ func TestOverlappingStreamImportsInflateQueueWeight(t *testing.T) {
 	}
 }
 
+// A config reload rebuilds every live subscription's shadows through the same
+// addShadowSubscriptions path, so the overlap duplication must not come back
+// after a reload either.
+func TestOverlappingStreamImportsSurviveReloadDeduped(t *testing.T) {
+	conf := `
+		listen: 127.0.0.1:-1
+		cluster {
+			name: "A"
+			listen: 127.0.0.1:-1
+		}
+		accounts: {
+			EXP: {
+				users = [{user: "exp", password: "pwd"}]
+				exports = [{stream: "foo.>"}]
+			}
+			IMP: {
+				users = [{user: "imp", password: "pwd"}]
+				imports = [
+					{stream: {account: "EXP", subject: "foo.>"}}
+					{stream: {account: "EXP", subject: "foo.bar"}}
+				]
+			}
+		}
+	`
+	cf := createConfFile(t, []byte(conf))
+	s, _ := RunServerWithConfig(cf)
+	defer s.Shutdown()
+
+	expAcc, err := s.LookupAccount("EXP")
+	require_NoError(t, err)
+
+	ncImp := natsConnect(t, s.ClientURL(), nats.UserInfo("imp", "pwd"))
+	defer ncImp.Close()
+	_, err = ncImp.SubscribeSync("foo.bar")
+	require_NoError(t, err)
+	require_NoError(t, ncImp.Flush())
+
+	checkFor(t, 2*time.Second, 10*time.Millisecond, func() error {
+		if n := len(overlapSubs(expAcc, "foo.bar")); n == 0 {
+			return fmt.Errorf("EXP has no shadow for foo.bar")
+		}
+		return nil
+	})
+
+	require_NoError(t, s.Reload())
+
+	key := keyFromSubWithOrigin(&subscription{subject: []byte("foo.bar")})
+	checkFor(t, 2*time.Second, 10*time.Millisecond, func() error {
+		if n := len(overlapSubs(expAcc, "foo.bar")); n != 1 {
+			return fmt.Errorf("EXP has %d shadow(s) after reload", n)
+		}
+		expAcc.mu.RLock()
+		rm := expAcc.rm[key]
+		expAcc.mu.RUnlock()
+		if rm != 1 {
+			return fmt.Errorf("EXP rm[%q]=%d after reload, want 1", key, rm)
+		}
+		return nil
+	})
+}
+
 func overlapSubs(a *Account, subject string) []*subscription {
 	a.mu.RLock()
 	sr := a.sl.Match(subject)
