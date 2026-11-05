@@ -2600,6 +2600,11 @@ func (s *Server) Start() {
 	// Wait for clients.
 	if !opts.DontListen {
 		s.AcceptLoop(clientListenReady)
+	} else {
+		// No client listener, so the routing routine can proceed. Without this,
+		// StartRouting would block forever on clientListenReady and Shutdown
+		// would hang in grWG.Wait().
+		close(clientListenReady)
 	}
 
 	// Bring OSCP Response cache online after accept loop started in anticipation of NATS-enabled cache types
@@ -4521,16 +4526,19 @@ func (s *Server) startLameDuckMode() {
 func (s *Server) enterLameDuckMode() (int, bool) {
 	s.mu.Lock()
 	// Check if there is actually anything to do
-	if s.isShuttingDown() || s.ldm || s.listener == nil {
+	if s.isShuttingDown() || s.ldm || !s.isRunning() {
 		s.mu.Unlock()
 		return 0, false
 	}
 	s.Noticef("Entering lame duck mode, stop accepting new clients")
 	s.ldm = true
 	s.sendLDMShutdownEventLocked()
-	expected := 1
-	s.listener.Close()
-	s.listener = nil
+	expected := 0
+	if s.listener != nil {
+		expected++
+		s.listener.Close()
+		s.listener = nil
+	}
 	expected += s.closeWebsocketServer()
 	if s.mqtt.listener != nil {
 		expected++
