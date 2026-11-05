@@ -342,8 +342,9 @@ type rrTracking struct {
 
 // Struct for PING initiation from the server.
 type pinfo struct {
-	tmr *time.Timer
-	out int
+	tmr   *time.Timer
+	out   int
+	first time.Time // when the oldest unanswered PING was sent
 }
 
 // outbound holds pending data for a socket.
@@ -2767,6 +2768,9 @@ func (c *client) sendRTTPingLocked() bool {
 // Assume the lock is held upon entry.
 func (c *client) sendPing() {
 	c.rttStart = time.Now().UTC()
+	if c.ping.out == 0 {
+		c.ping.first = c.rttStart
+	}
 	c.ping.out++
 	if c.trace {
 		c.traceOutOp("PING", nil)
@@ -4596,8 +4600,9 @@ func (c *client) processInboundClientMsg(msg []byte) (bool, bool) {
 		// delivered to. When sending to the GWs, the RMSG will include
 		// those names so that the remote clusters do not deliver messages
 		// to their queue subs of the same names.
+		// A relaying server may have lost all remote queue interest, so it always collects.
 		if len(r.qsubs) > 0 && c.srv.gateway.enabled &&
-			atomic.LoadInt64(&c.srv.gateway.totalQSubs) > 0 {
+			(c.srv.gateway.relay || atomic.LoadInt64(&c.srv.gateway.totalQSubs) > 0) {
 			flag |= pmrCollectQueueNames
 		}
 		didDeliver, qnames = c.processMsgResults(acc, r, msg, c.pa.deliver, c.pa.subject, c.pa.reply, flag)

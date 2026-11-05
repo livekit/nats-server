@@ -58,6 +58,12 @@ const (
 	// Gateway connections send PINGs regardless of traffic. The interval is
 	// either Options.PingInterval or this value, whichever is the smallest.
 	gwMaxPingInterval = 15 * time.Second
+
+	defaultGatewayRelayPongWait = time.Second
+
+	// Headers on a relayed RMSG between route peers. Stripped before the gateway send.
+	gwRelayHdr  = "Nats-Gw-Relay"   // "<0|1> <cluster>[,<cluster>...]": 0 = original had no header
+	gwRelayQHdr = "Nats-Gw-Relay-Q" // queue groups already served by the origin cluster
 )
 
 var (
@@ -147,6 +153,8 @@ type srvGateway struct {
 	info     *Info                  // Gateway Info protocol
 	infoJSON []byte                 // Marshal'ed Info protocol
 	runknown bool                   // Rejects unknown (not configured) gateway connections
+	relay    bool                   // Immutable, relay through route peers when an outbound is unhealthy
+	relayPW  time.Duration          // Immutable, unanswered PING age at which an outbound is unhealthy
 	replyPfx []byte                 // Will be "_GR_.<6:cluster hash>.<6:server hash>."
 
 	// We maintain the interest of subjects and queues per account.
@@ -345,6 +353,11 @@ func (s *Server) newGateway(opts *Options) error {
 		URLs:     make(refCountedUrlSet),
 		resolver: opts.Gateway.resolver,
 		runknown: opts.Gateway.RejectUnknown,
+		relay:    opts.Gateway.Relay,
+		relayPW:  opts.Gateway.RelayPongWait,
+	}
+	if gateway.relayPW == 0 {
+		gateway.relayPW = defaultGatewayRelayPongWait
 	}
 	gateway.Lock()
 	defer gateway.Unlock()
@@ -1724,6 +1737,20 @@ func (s *Server) registerOutboundGatewayConnection(name string, gwc *client) boo
 
 // Returns the outbound gateway connection (*client) with the given name,
 // or nil if not found
+// Names of configured or discovered remote clusters with no outbound connection.
+// Gateway read lock held on entry.
+func (g *srvGateway) missingOutboundsLocked(dst []string) []string {
+	if len(g.out) >= len(g.remotes) {
+		return dst
+	}
+	for name := range g.remotes {
+		if _, ok := g.out[name]; !ok {
+			dst = append(dst, name)
+		}
+	}
+	return dst
+}
+
 func (s *Server) getOutboundGatewayConnection(name string) *client {
 	s.gateway.RLock()
 	gwc := s.gateway.out[name]
@@ -2536,6 +2563,12 @@ var subPool = &sync.Pool{
 // regardless if it is a LEAF connection or not.
 // <Invoked from any client connection's readLoop>
 func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgroups [][]byte, checkLeafQF bool) bool {
+	return c.sendMsgToGatewaysEx(acc, msg, subject, reply, qgroups, checkLeafQF, nil)
+}
+
+// relayFor is set when executing a relay for a route peer: only those
+// clusters are considered and the message is never relayed again.
+func (c *client) sendMsgToGatewaysEx(acc *Account, msg, subject, reply []byte, qgroups [][]byte, checkLeafQF bool, relayFor []string) bool {
 	// We had some times when we were sending across a GW with no subject, and the other side would break
 	// due to parser error. These need to be fixed upstream but also double check here.
 	if len(subject) == 0 {
@@ -2553,8 +2586,13 @@ func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgr
 		gws = append(gws, gw.outo[i])
 	}
 	thisClusterReplyPrefix := gw.replyPfx
+	relay := gw.relay && relayFor == nil
+	var relayTo []string
+	if relay {
+		relayTo = gw.missingOutboundsLocked(nil)
+	}
 	gw.RUnlock()
-	if len(gws) == 0 {
+	if len(gws) == 0 && len(relayTo) == 0 {
 		return false
 	}
 
@@ -2588,6 +2626,10 @@ func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgr
 	}
 	for i := 0; i < len(gws); i++ {
 		gwc := gws[i]
+		if relayFor != nil && !slices.Contains(relayFor, gwc.gw.name) {
+			continue
+		}
+		nq := len(qgroups)
 		if directSend {
 			gwc.mu.Lock()
 			var ok bool
@@ -2643,6 +2685,12 @@ func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgr
 			if !psi && len(queues) == 0 {
 				continue
 			}
+		}
+		// Leave its queue groups unclaimed so a healthy gateway may still serve them.
+		if relay && gwc.gatewayRelayUnhealthy(gw.relayPW) {
+			qgroups = qgroups[:nq]
+			relayTo = append(relayTo, gwc.gw.name)
+			continue
 		}
 		if checkReply {
 			// Check/map only once
@@ -2724,6 +2772,9 @@ func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgr
 		if mt != nil {
 			c.pa = pa
 		}
+	}
+	if len(relayTo) > 0 && c.relayMsgToRoutePeer(acc, msg, subject, reply, qgroups, relayTo) {
+		didDeliver = true
 	}
 	if dlvMsgs > 0 {
 		totalBytes := dlvMsgs*int64(len(msg)) + dlvExtraSz

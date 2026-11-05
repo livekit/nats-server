@@ -162,6 +162,13 @@ type GatewayOpts struct {
 	PingInterval      time.Duration        `json:"-"`
 	MaxPingsOut       int                  `json:"-"`
 
+	// Relay hands messages for a remote cluster to a route peer when this
+	// server's own outbound gateway to it is missing or unhealthy.
+	Relay bool `json:"relay,omitempty"`
+	// RelayPongWait marks an outbound gateway unhealthy once a PING has gone
+	// unanswered this long.
+	RelayPongWait time.Duration `json:"-"`
+
 	// Not exported, for tests.
 	resolver         netResolver
 	sendQSubsBufSize int

@@ -479,6 +479,10 @@ func (c *client) processInboundRoutedMsg(msg []byte) {
 		return
 	}
 
+	if c.pa.hdr > 0 && c.srv.gateway.enabled && c.processGatewayRelay(msg) {
+		return
+	}
+
 	// If the subject (c.pa.subject) has the gateway prefix, this function will handle it.
 	if c.handleGatewayReply(msg) {
 		// We are done here.
