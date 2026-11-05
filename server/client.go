@@ -6338,6 +6338,17 @@ func (c *client) processSubsOnConfigReload(awcsti map[string]struct{}) {
 	}
 	c.mu.Unlock()
 
+	// Determine how the interest registered by the old shadow subscriptions
+	// needs to be withdrawn, mirroring what unsubscribe() does.
+	var (
+		updateRoute bool
+		isSpokeLeaf bool
+	)
+	c.mu.Lock()
+	isSpokeLeaf = c.isSpokeLeafNode()
+	updateRoute = !isSpokeLeaf && (c.kind == CLIENT || c.kind == SYSTEM || c.kind == LEAF || c.kind == JETSTREAM) && c.srv != nil
+	c.mu.Unlock()
+
 	// This list is all subs who are allowed and we need to check accounts.
 	for _, sub := range subs {
 		c.mu.Lock()
@@ -6346,7 +6357,14 @@ func (c *client) processSubsOnConfigReload(awcsti map[string]struct{}) {
 		c.mu.Unlock()
 		c.addShadowSubscriptions(acc, sub)
 		for _, nsub := range oldShadows {
-			nsub.im.acc.sl.Remove(nsub)
+			if err := nsub.im.acc.sl.Remove(nsub); err != nil {
+				c.Debugf("Could not remove shadow import subscription for account %q", nsub.im.acc.Name)
+			}
+			if updateRoute {
+				c.srv.updateRemoteSubscription(nsub.im.acc, nsub, -1)
+			} else if isSpokeLeaf {
+				nsub.im.acc.updateLeafNodesEx(nsub, -1, true)
+			}
 		}
 	}
 
