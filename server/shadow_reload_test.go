@@ -117,3 +117,61 @@ func TestStreamImportReloadRemovesRouteInterest(t *testing.T) {
 		t.Fatalf("Ghost route interest in exporting account after reload: %v", rm)
 	}
 }
+
+// Same as above, but with a queue subscription: the exported queue weight
+// advertised to routes (acc.rm/acc.lws) must also return to zero.
+func TestStreamImportReloadRemovesQueueInterest(t *testing.T) {
+	s, _, confFile := runReloadServerWithContent(t, []byte(shadowReloadConf))
+	defer s.Shutdown()
+
+	nc := natsConnect(t, s.ClientURL(), nats.UserInfo("b", "pwd"))
+	defer nc.Close()
+	sub := natsQueueSubSync(t, nc, "import.foo.bar", "workers")
+	natsFlush(t, nc)
+
+	ea, err := s.LookupAccount("EA")
+	if err != nil {
+		t.Fatalf("Error looking up account: %v", err)
+	}
+	key := "R foo.bar workers"
+	ea.mu.RLock()
+	n, w := ea.rm[key], ea.lws[key]
+	ea.mu.RUnlock()
+	if n != 1 {
+		t.Fatalf("Expected queue route interest for %q, got %d", key, n)
+	}
+
+	if err := os.WriteFile(confFile, []byte(shadowReloadConfNoImport), 0666); err != nil {
+		t.Fatalf("Error rewriting conf: %v", err)
+	}
+	if err := s.Reload(); err != nil {
+		t.Fatalf("Error on reload: %v", err)
+	}
+
+	checkFor(t, 2*time.Second, 10*time.Millisecond, func() error {
+		var subs []*subscription
+		ea.sl.All(&subs)
+		for _, sub := range subs {
+			if string(sub.subject) == "foo.bar" {
+				return fmt.Errorf("shadow queue subscription not removed")
+			}
+		}
+		return nil
+	})
+
+	ea.mu.RLock()
+	n, w = ea.rm[key], ea.lws[key]
+	ea.mu.RUnlock()
+	if n != 0 {
+		t.Fatalf("Ghost queue route interest for %q after reload: rm=%d lws=%d", key, n, w)
+	}
+
+	// A later call to the client's own UNSUB must not resurrect it either.
+	natsUnsub(t, sub)
+	ea.mu.RLock()
+	n, w = ea.rm[key], ea.lws[key]
+	ea.mu.RUnlock()
+	if n != 0 {
+		t.Fatalf("Ghost queue route interest for %q after unsub: rm=%d lws=%d", key, n, w)
+	}
+}
