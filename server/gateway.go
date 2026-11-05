@@ -1132,6 +1132,19 @@ func (c *client) processGatewayInfo(info *Info) {
 				c.Noticef("Outbound gateway connection to %q (%s) registered", gwName, info.ID)
 				// Now that the outbound gateway is registered, we can remove from temp map.
 				s.removeFromTempClients(cid)
+				// It is possible that the connection was closed concurrently
+				// with the registration above (for instance the stale
+				// connection timer firing while this was being processed).
+				// In that case closeConnection() ran before the connection
+				// was added to s.gateway.out, so it found nothing to remove
+				// there. Check again and clean up if needed.
+				c.mu.Lock()
+				closed := c.isClosed()
+				c.mu.Unlock()
+				if closed {
+					s.removeRemoteGatewayConnection(c)
+					return
+				}
 				// Set the Ping timer after sending connect and info.
 				c.mu.Lock()
 				c.setFirstPingTimer()
@@ -1181,6 +1194,18 @@ func (c *client) processGatewayInfo(info *Info) {
 
 		// Now that it is registered, we can remove from temp map.
 		s.removeFromTempClients(cid)
+
+		// It is possible that the connection was closed concurrently with the
+		// registration above. In that case closeConnection() ran before the
+		// connection was added to s.gateway.in, so it found nothing to remove
+		// there. Check again and clean up if needed.
+		c.mu.Lock()
+		closed := c.isClosed()
+		c.mu.Unlock()
+		if closed {
+			s.removeRemoteGatewayConnection(c)
+			return
+		}
 
 		// Send our QSubs.
 		s.sendQueueSubsToGateway(c)
