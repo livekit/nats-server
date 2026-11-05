@@ -15,6 +15,7 @@ package server
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -126,4 +127,77 @@ func acctCloseSubsLocked(a *Account, subject string) []*subscription {
 		subs = append(subs, qs...)
 	}
 	return subs
+}
+
+// Public reachability: the same cleanup runs when an account is deleted from
+// the config on reload (reload.go "deleted accounts" loop calls
+// removeAllServiceImportSubs). The shadow in the surviving exporting account
+// must not outlive the deleted account.
+func TestAccountRemovedOnReloadLeavesShadowInExportingAccount(t *testing.T) {
+	confB := `
+	listen: 127.0.0.1:-1
+	cluster {
+		name: "A"
+		listen: 127.0.0.1:-1
+	}
+	accounts: {
+		C: {
+			users = [{user: "c", password: "pwd"}]
+			exports = [{stream: "_R_.>"}]
+		}
+		IMP: {
+			users = [{user: "imp", password: "pwd"}]
+		}
+	}
+`
+	cf := createConfFile(t, []byte(acctCloseShadowConf))
+	s, _ := RunServerWithConfig(cf)
+	defer s.Shutdown()
+
+	cAcc, err := s.LookupAccount("C")
+	require_NoError(t, err)
+	srvAcc, err := s.LookupAccount("SRV")
+	require_NoError(t, err)
+
+	ncImp := natsConnect(t, s.ClientURL(), nats.UserInfo("imp", "pwd"))
+	defer ncImp.Close()
+	ncImp.Request("svc", []byte("hi"), 100*time.Millisecond)
+
+	checkFor(t, 2*time.Second, 10*time.Millisecond, func() error {
+		srvAcc.mu.RLock()
+		siReply := srvAcc.siReply
+		srvAcc.mu.RUnlock()
+		if siReply == nil {
+			return fmt.Errorf("account reply wildcard not created")
+		}
+		if n := len(acctCloseSubs(cAcc, string(siReply)+">")); n == 0 {
+			return fmt.Errorf("C has no shadow for %q", string(siReply)+">")
+		}
+		return nil
+	})
+
+	srvAcc.mu.RLock()
+	siReply := string(srvAcc.siReply)
+	srvAcc.mu.RUnlock()
+
+	require_NoError(t, os.WriteFile(cf, []byte(confB), 0644))
+	require_NoError(t, s.Reload())
+
+	cAcc.mu.RLock()
+	nshadow := len(acctCloseSubsLocked(cAcc, siReply+">"))
+	var keys []string
+	for k := range cAcc.rm {
+		if strings.Contains(k, "_R_.") {
+			keys = append(keys, fmt.Sprintf("%s=%d", k, cAcc.rm[k]))
+		}
+	}
+	cAcc.mu.RUnlock()
+
+	t.Logf("after reload that deleted SRV: C shadow(s)=%d, rm=%v", nshadow, keys)
+	if nshadow != 0 {
+		t.Fatalf("C still has %d shadow sub(s) for the deleted account's internal sub", nshadow)
+	}
+	if len(keys) != 0 {
+		t.Fatalf("C still announces interest for the deleted account's internal sub: %v", keys)
+	}
 }
