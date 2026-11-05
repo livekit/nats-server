@@ -14,6 +14,7 @@
 package server
 
 import (
+	"fmt"
 	"strconv"
 	"sync"
 )
@@ -33,7 +34,7 @@ type sendq struct {
 }
 
 func (s *Server) newSendQ(acc *Account) *sendq {
-	sq := &sendq{s: s, q: newIPQueue[*outMsg](s, "SendQ"), a: acc}
+	sq := &sendq{s: s, q: newIPQueue[*outMsg](s, fmt.Sprintf("[ACC:%s] SendQ", acc.GetName())), a: acc}
 	s.startGoRoutine(sq.internalLoop)
 	return sq
 }
