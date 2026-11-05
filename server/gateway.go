@@ -1788,7 +1788,13 @@ func (s *Server) removeRemoteGatewayConnection(c *client) {
 	gw := s.gateway
 	gw.Lock()
 	if isOutbound {
-		delete(gw.out, gwName)
+		// Only remove the entry if it is still the connection being closed.
+		// A client that failed to register (duplicate outbound, wrong port or
+		// name, TLS or auth failure) also goes through here, and must not
+		// unregister the live connection stored under the same name.
+		if cur, ok := gw.out[gwName]; ok && cur == c {
+			delete(gw.out, gwName)
+		}
 		louto := len(gw.outo)
 		reorder := false
 		for i := 0; i < len(gw.outo); i++ {
