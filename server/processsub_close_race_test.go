@@ -149,32 +149,33 @@ func TestProcessSubPublishesShadowForClosedClient(t *testing.T) {
 		t.Fatalf("timed out waiting for the client disconnect")
 	}
 
-	expSubs := processSubSnapshot(expAcc, "foo.bar")
-	if len(expSubs) == 0 {
-		t.Fatalf("no shadow sub in EXP: the parked SUB did not leak one")
-	}
-	for _, shadow := range expSubs {
-		key := keyFromSubWithOrigin(shadow)
+	// The parked SUB finishes asynchronously after the account lock is
+	// released: it must not leave a shadow or remote interest for the closed
+	// client. On main the leak is permanent, so this check times out.
+	key := keyFromSubWithOrigin(&subscription{subject: []byte("foo.bar")})
+	checkFor(t, 2*time.Second, 10*time.Millisecond, func() error {
+		expSubs := processSubSnapshot(expAcc, "foo.bar")
+		for _, shadow := range expSubs {
+			t.Logf("shadow for closed client: sid=%q subject=%q closed=%v clientClosed=%v",
+				shadow.sid, shadow.subject, shadow.isClosed(),
+				shadow.client == nil || shadow.client.isClosed())
+		}
 		expAcc.mu.RLock()
 		rm, lws := expAcc.rm[key], expAcc.lws[key]
 		expAcc.mu.RUnlock()
-		t.Logf("leaked shadow: sid=%q subject=%q closed=%v clientClosed=%v rm=%d lws=%d",
-			shadow.sid, shadow.subject, shadow.isClosed(),
-			shadow.client == nil || shadow.client.isClosed(), rm, lws)
-	}
-	t.Fatalf("exporting account still has %d shadow sub(s) for a disconnected client", len(expSubs))
+		if len(expSubs) != 0 {
+			return fmt.Errorf("EXP has %d shadow sub(s) for a disconnected client (rm=%d lws=%d)", len(expSubs), rm, lws)
+		}
+		if rm != 0 || lws != 0 {
+			return fmt.Errorf("EXP announces interest for a disconnected client: rm=%d lws=%d", rm, lws)
+		}
+		return nil
+	})
 
-	// Unreachable while the leak exists; permanence oracle for a fixed build.
 	c.mu.Lock()
 	nsubs := len(c.subs)
 	c.mu.Unlock()
 	if nsubs != 0 {
 		t.Fatalf("closed client still tracks %d subs", nsubs)
 	}
-	checkFor(t, 2*time.Second, 10*time.Millisecond, func() error {
-		if n := expAcc.TotalSubs(); n != 0 {
-			return fmt.Errorf("EXP still has %d subs after the client is gone", n)
-		}
-		return nil
-	})
 }
