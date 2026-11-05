@@ -6135,3 +6135,77 @@ func TestRoutePinnedAccountPartialReloadKeepsInterest(t *testing.T) {
 	checkSubInterest(t, srvc, "A", "foo", 2*time.Second)
 	send("after")
 }
+
+func TestRoutePinnedAccountFullRollingReloadKeepsInterest(t *testing.T) {
+	tmpl := `
+		port: -1
+		server_name: "%s"
+		accounts {
+			A { users: [{user: "u", password: "pwd"}] }
+		}
+		cluster {
+			name: "local"
+			listen: 127.0.0.1:-1
+			%s
+			pool_size: 3
+			%s
+		}
+	`
+	gen := func(name, routes, accs string) string {
+		return fmt.Sprintf(tmpl, name, routes, accs)
+	}
+	routeTo := func(port int) string {
+		return fmt.Sprintf("routes: [\"nats://127.0.0.1:%d\"]", port)
+	}
+
+	confA := createConfFile(t, []byte(gen("A", _EMPTY_, _EMPTY_)))
+	srva, optsA := RunServerWithConfig(confA)
+	defer srva.Shutdown()
+
+	confB := createConfFile(t, []byte(gen("B", routeTo(optsA.Cluster.Port), _EMPTY_)))
+	srvb, _ := RunServerWithConfig(confB)
+	defer srvb.Shutdown()
+
+	confC := createConfFile(t, []byte(gen("C", routeTo(optsA.Cluster.Port), _EMPTY_)))
+	srvc, _ := RunServerWithConfig(confC)
+	defer srvc.Shutdown()
+
+	checkClusterFormed(t, srva, srvb, srvc)
+
+	ncSub := natsConnect(t, srva.ClientURL(), nats.UserInfo("u", "pwd"))
+	defer ncSub.Close()
+	sub := natsSubSync(t, ncSub, "foo")
+	natsFlush(t, ncSub)
+
+	ncPub := natsConnect(t, srvc.ClientURL(), nats.UserInfo("u", "pwd"))
+	defer ncPub.Close()
+
+	send := func(msg string) {
+		t.Helper()
+		natsPub(t, ncPub, "foo", []byte(msg))
+		if m := natsNexMsg(t, sub, 2*time.Second); string(m.Data) != msg {
+			t.Fatalf("Expected message %q, got %q", msg, m.Data)
+		}
+	}
+	checkSubInterest(t, srvc, "A", "foo", 2*time.Second)
+	send("before")
+
+	// Rolling reload of all three servers.
+	pinA := `accounts: ["A"]`
+	reloadUpdateConfig(t, srvb, confB, gen("B", routeTo(optsA.Cluster.Port), pinA))
+	reloadUpdateConfig(t, srva, confA, gen("A", _EMPTY_, pinA))
+	reloadUpdateConfig(t, srvc, confC, gen("C", routeTo(optsA.Cluster.Port), pinA))
+
+	checkFor(t, 5*time.Second, 25*time.Millisecond, func() error {
+		srva.mu.RLock()
+		r := srva.accRoutes["A"][srvc.ID()]
+		srva.mu.RUnlock()
+		if r == nil {
+			return fmt.Errorf("dedicated route for A from C to A not established")
+		}
+		return nil
+	})
+
+	checkSubInterest(t, srvc, "A", "foo", 2*time.Second)
+	send("after")
+}
