@@ -652,9 +652,25 @@ func (c *client) processRouteInfo(info *Info) {
 				if rpi <= 0 || info.RoutePoolSize != s.routesPoolSize {
 					rpi = computeRoutePoolIdx(info.RoutePoolSize, an)
 				}
-				// Go over each remote's route at pool index `rpi` and remove
-				// remote subs for this account.
-				s.forEachRouteIdx(rpi, func(r *client) bool {
+				// Go over each remote's route and remove remote subs for
+				// this account. Remotes may have a different pool size than
+				// us and than each other (supported for rolling upgrades),
+				// so we need to compute the index for each remote based on
+				// its own configured pool size. Using the index computed
+				// from the remote that sent this INFO could be out of range
+				// for a remote with a smaller pool size.
+				for remoteID, conns := range s.routes {
+					idx := rpi
+					if rps := s.remoteRoutePoolSize[remoteID]; rps > 0 {
+						idx = computeRoutePoolIdx(rps, an)
+					}
+					if idx < 0 || idx >= len(conns) {
+						continue
+					}
+					r := conns[idx]
+					if r == nil {
+						continue
+					}
 					r.mu.Lock()
 					// Exclude routes to servers that don't support pooling.
 					if !r.route.noPool {
@@ -663,8 +679,7 @@ func (c *client) processRouteInfo(info *Info) {
 						}
 					}
 					r.mu.Unlock()
-					return true
-				})
+				}
 				// Respond to the remote by clearing the RouteAccount field.
 				info.RouteAccount = _EMPTY_
 				proto := generateInfoJSON(info)
@@ -3353,6 +3368,9 @@ func (s *Server) forEachRoute(f func(r *client)) {
 // Server lock is held on entry.
 func (s *Server) forEachRouteIdx(idx int, f func(r *client) bool) {
 	for _, conns := range s.routes {
+		if idx < 0 || idx >= len(conns) {
+			continue
+		}
 		if r := conns[idx]; r != nil {
 			if !f(r) {
 				return
