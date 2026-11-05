@@ -6925,7 +6925,15 @@ func TestMonitorIpqzWithGenerics(t *testing.T) {
 	queues := IpqueueszStatus{}
 	require_NoError(t, json.Unmarshal(body, &queues))
 	require_True(t, len(queues) >= 4)
-	_, ok := queues["SendQ"]
+	// Sends queues are named per account (e.g. "[ACC:$G] SendQ"), so look
+	// for any send queue entry instead of an exact name.
+	var ok bool
+	for name := range queues {
+		if strings.Contains(name, "SendQ") {
+			ok = true
+			break
+		}
+	}
 	require_True(t, ok)
 }
 
