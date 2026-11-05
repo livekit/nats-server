@@ -3617,6 +3617,13 @@ func (c *client) processUnsub(arg []byte) error {
 		acc = c.acc
 		if max > 0 && max > sub.nm {
 			sub.max = max
+			// Stream-import shadows are independent copies created at subscribe
+			// time; when the import was already in place they missed the limit
+			// being set here. Apply it to the existing shadows too, so the
+			// account that delivers across the import can auto-unsubscribe.
+			for _, nsub := range sub.shadow {
+				nsub.max = max
+			}
 		} else {
 			// Clear it here to override
 			sub.max = 0
@@ -3950,6 +3957,25 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 
 	// Check if we should auto-unsubscribe.
 	if sub.max > 0 {
+		// A stream import shadow is an independent copy of the original
+		// subscription (same sid) and may have inherited its auto-unsubscribe
+		// limit. Interest announcements for the shadow were made in the
+		// exporting account, so the unsubscribe has to run on the original:
+		// that deletes the sid from the client, removes the original from the
+		// importing account and, through its shadow list, removes the shadow
+		// from the exporting account and withdraws its interest there.
+		// The client's lock is held here, so its sub map is stable.
+		asub := sub
+		if sub.im != nil {
+			if orig := client.subs[bytesToString(sub.sid)]; orig != nil && orig != sub {
+				for _, shadow := range orig.shadow {
+					if shadow == sub {
+						asub = orig
+						break
+					}
+				}
+			}
+		}
 		if client.kind == ROUTER && sub.nm >= sub.max {
 			// The only router based messages that we will see here are remoteReplies.
 			// We handle these slightly differently.
@@ -3965,16 +3991,16 @@ func (c *client) deliverMsg(prodIsMQTT bool, sub *subscription, acc *Account, su
 				// Due to defer, reverse the code order so that execution
 				// is consistent with other cases where we unsubscribe.
 				if shouldForward {
-					defer srv.updateRemoteSubscription(client.acc, sub, -1)
+					defer srv.updateRemoteSubscription(client.acc, asub, -1)
 				}
-				defer client.unsubscribe(client.acc, sub, true, true)
+				defer client.unsubscribe(client.acc, asub, true, true)
 			} else if sub.nm > sub.max {
 				client.Debugf("Auto-unsubscribe limit [%d] exceeded", sub.max)
 				mt.addEgressEvent(client, sub, errMsgTraceAutoSubExceeded)
 				client.mu.Unlock()
-				client.unsubscribe(client.acc, sub, true, true)
+				client.unsubscribe(client.acc, asub, true, true)
 				if shouldForward {
-					srv.updateRemoteSubscription(client.acc, sub, -1)
+					srv.updateRemoteSubscription(client.acc, asub, -1)
 				}
 				return false
 			}
