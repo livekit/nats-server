@@ -3380,16 +3380,22 @@ func (c *client) addShadowSub(sub *subscription, ime *ime) (*subscription, error
 	nsub.origin = nil
 
 	if !im.usePub && ime.dyn && im.tr != nil {
-		if im.rtr == nil {
-			im.rtr = im.tr.reverse()
+		// The reverse transform is built when the import is created. Do not
+		// store it here: this runs on each client's read loop without the
+		// account lock, and concurrent subscribes would race on im.rtr.
+		rtr := im.rtr
+		if rtr == nil {
+			rtr = im.tr.reverse()
 		}
-		s := bytesToString(nsub.subject)
-		if ime.overlapSubj != _EMPTY_ {
-			s = ime.overlapSubj
+		if rtr != nil {
+			s := bytesToString(nsub.subject)
+			if ime.overlapSubj != _EMPTY_ {
+				s = ime.overlapSubj
+			}
+			nsub.subject = []byte(rtr.TransformSubject(s))
+		} else {
+			nsub.subject = []byte(im.from)
 		}
-		subj := im.rtr.TransformSubject(s)
-
-		nsub.subject = []byte(subj)
 	} else if !im.usePub || (im.usePub && ime.overlapSubj != _EMPTY_) || !ime.dyn {
 		if ime.overlapSubj != _EMPTY_ {
 			nsub.subject = []byte(ime.overlapSubj)

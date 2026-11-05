@@ -2793,6 +2793,7 @@ func (a *Account) addMappedStreamImportWithClaim(account *Account, from, to stri
 	var (
 		usePub bool
 		tr     *subjectTransform
+		rtr    *subjectTransform
 		err    error
 	)
 	if subjectHasWildcard(from) {
@@ -2805,6 +2806,10 @@ func (a *Account) addMappedStreamImportWithClaim(account *Account, from, to stri
 					from, to, err)
 			}
 			to, _ = transformUntokenize(to)
+			// Build the reverse transform now, under the account lock below,
+			// since it is read by client read loops when a shadow sub is
+			// created and must not be initialized lazily from there.
+			rtr = tr.reverse()
 		}
 	}
 
@@ -2816,7 +2821,7 @@ func (a *Account) addMappedStreamImportWithClaim(account *Account, from, to stri
 	if imClaim != nil {
 		allowTrace = imClaim.AllowTrace
 	}
-	a.imports.streams = append(a.imports.streams, &streamImport{account, from, to, tr, nil, imClaim, usePub, false, allowTrace})
+	a.imports.streams = append(a.imports.streams, &streamImport{account, from, to, tr, rtr, imClaim, usePub, false, allowTrace})
 	a.mu.Unlock()
 	return nil
 }
