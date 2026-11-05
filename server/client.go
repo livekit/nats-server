@@ -3222,6 +3222,21 @@ func (c *client) processSubEx(subject, queue, bsid []byte, cb msgHandler, noForw
 		c.Errorf(err.Error())
 	}
 
+	// The subscription may have been unsubscribed or its connection closed
+	// between the insert under c.mu and the shadow creation above. The removal
+	// path then saw a nil shadow handle, removed nothing and already withdrew
+	// the primary interest, so the shadows created above belong to a dead
+	// subscription: take them back, remove them and withdraw their interest
+	// before announcing anything else for it.
+	if sub.isClosed() {
+		c.mu.Lock()
+		shadow := sub.shadow
+		sub.shadow = nil
+		c.mu.Unlock()
+		c.withdrawShadowSubs(shadow)
+		return sub, nil
+	}
+
 	if noForward {
 		return sub, nil
 	}
@@ -3236,6 +3251,36 @@ func (c *client) processSubEx(subject, queue, bsid []byte, cb msgHandler, noForw
 	// Now check on leafnode updates.
 	acc.updateLeafNodes(sub, 1)
 	return sub, nil
+}
+
+// withdrawShadowSubs removes shadow subscriptions from their exporting
+// accounts' sublists and withdraws the interest announced for them, mirroring
+// the shadow cleanup in unsubscribe. The caller must have detached them from
+// sub.shadow already.
+func (c *client) withdrawShadowSubs(shadow []*subscription) {
+	if len(shadow) == 0 {
+		return
+	}
+	c.mu.Lock()
+	isSpokeLeaf := c.isSpokeLeafNode()
+	updateRoute := !isSpokeLeaf && (c.kind == CLIENT || c.kind == SYSTEM || c.kind == LEAF || c.kind == JETSTREAM) && c.srv != nil
+	c.mu.Unlock()
+	for _, nsub := range shadow {
+		c.removeShadowSub(nsub, updateRoute, isSpokeLeaf)
+	}
+}
+
+// removeShadowSub removes one shadow subscription and withdraws the interest
+// that was announced for it.
+func (c *client) removeShadowSub(nsub *subscription, updateRoute, isSpokeLeaf bool) {
+	if err := nsub.im.acc.sl.Remove(nsub); err != nil {
+		c.Debugf("Could not remove shadow import subscription for account %q", nsub.im.acc.Name)
+	}
+	if updateRoute {
+		c.srv.updateRemoteSubscription(nsub.im.acc, nsub, -1)
+	} else if isSpokeLeaf {
+		nsub.im.acc.updateLeafNodesEx(nsub, -1, true)
+	}
 }
 
 // Used to pass stream import matches to addShadowSub
@@ -3567,14 +3612,7 @@ func (c *client) unsubscribe(acc *Account, sub *subscription, force, remove bool
 
 	// Process shadow subs if we have them.
 	for _, nsub := range shadowSubs {
-		if err := nsub.im.acc.sl.Remove(nsub); err != nil {
-			c.Debugf("Could not remove shadow import subscription for account %q", nsub.im.acc.Name)
-		}
-		if updateRoute {
-			c.srv.updateRemoteSubscription(nsub.im.acc, nsub, -1)
-		} else if isSpokeLeaf {
-			nsub.im.acc.updateLeafNodesEx(nsub, -1, true)
-		}
+		c.removeShadowSub(nsub, updateRoute, isSpokeLeaf)
 	}
 
 	// Now check to see if this was part of a respMap entry for service imports.
