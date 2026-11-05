@@ -1253,6 +1253,23 @@ func (s *Server) configureAccounts(reloading bool) (map[string]struct{}, error) 
 	// account and hence no sublist, so will panic on inbound message.
 	siMap := make(map[*Account][][]byte)
 
+	// On a reload, register the accounts that are new in the options before any
+	// of them is updated. The update below copies each account's imports from
+	// its options counterpart, and those imports reference the options accounts
+	// (which have no sublist). Rebinding them to registered accounts while the
+	// imports are already visible to clients requires every exporting account to
+	// be registered by then, including exporters that this reload introduces.
+	if reloading {
+		for _, acc := range opts.Accounts {
+			if acc.Name == globalAccountName {
+				continue
+			}
+			if _, ok := s.accounts.Load(acc.Name); !ok {
+				s.registerAccountNoLock(NewAccount(acc.Name))
+			}
+		}
+	}
+
 	// Check opts and walk through them. We need to copy them here
 	// so that we do not keep a real one sitting in the options.
 	for _, acc := range opts.Accounts {
@@ -1292,6 +1309,12 @@ func (s *Server) configureAccounts(reloading bool) (map[string]struct{}, error) 
 				// We call shallowCopy from the account `acc` (the one in Options)
 				// and pass `a` (our existing account) to get it updated.
 				acc.shallowCopy(a)
+				// The copied stream imports still reference the options
+				// accounts, which have no sublist. Clients can already see these
+				// imports under a.mu and a SUB matching one would panic in
+				// addShadowSub, so bind them to the registered accounts now
+				// instead of waiting for the pass below.
+				s.bindStreamImportAccountsLocked(a)
 				a.mu.Unlock()
 				create = false
 			}
@@ -1514,6 +1537,22 @@ func (s *Server) configureAccounts(reloading bool) (map[string]struct{}, error) 
 	}
 
 	return awcsti, nil
+}
+
+// bindStreamImportAccountsLocked points every stream import of acc at the
+// registered exporting account. Imports copied from the Options account carry
+// the options account objects, which are never registered and have no sublist.
+// Account lock is held on entry; the server lock must be held so that the
+// account lookup is stable.
+func (s *Server) bindStreamImportAccountsLocked(acc *Account) {
+	for _, si := range acc.imports.streams {
+		if si.acc == nil || si.acc.sl != nil {
+			continue
+		}
+		if v, ok := s.accounts.Load(si.acc.Name); ok {
+			si.acc = v.(*Account)
+		}
+	}
 }
 
 // Setup the account resolver. For memory resolver, make sure the JWTs are
