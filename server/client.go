@@ -6425,7 +6425,7 @@ func (c *client) closeConnection(reason ClosedState) {
 
 		if acc != nil {
 			// Update remote subscriptions.
-			if kind == CLIENT || kind == LEAF || kind == JETSTREAM {
+			if kind == CLIENT || kind == LEAF || kind == JETSTREAM || kind == ACCOUNT {
 				// Remove client's subscriptions from the account and unregister
 				// client from that account. Keep c.subs populated because
 				// saveClosedClient (started as a goroutine in markConnAsClosed)
@@ -6467,7 +6467,7 @@ func (c *client) clearAccountSubs(close bool) {
 	kind := c.kind
 	srv := c.srv
 	acc := c.acc
-	if acc == nil || (kind != CLIENT && kind != LEAF && kind != JETSTREAM) {
+	if acc == nil || (kind != CLIENT && kind != LEAF && kind != JETSTREAM && kind != ACCOUNT) {
 		c.mu.Unlock()
 		return
 	}
