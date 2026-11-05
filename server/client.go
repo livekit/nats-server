@@ -6457,19 +6457,6 @@ func (c *client) processSubsOnConfigReload(awcsti map[string]struct{}) {
 	}
 }
 
-// removeShadowSub removes a shadow subscription from its exporting account and
-// withdraws the interest that was announced for it, mirroring unsubscribe.
-func (c *client) removeShadowSub(nsub *subscription, updateRoute, isSpokeLeaf bool) {
-	if err := nsub.im.acc.sl.Remove(nsub); err != nil {
-		c.Debugf("Could not remove shadow import subscription for account %q", nsub.im.acc.Name)
-	}
-	if updateRoute {
-		c.srv.updateRemoteSubscription(nsub.im.acc, nsub, -1)
-	} else if isSpokeLeaf {
-		nsub.im.acc.updateLeafNodesEx(nsub, -1, true)
-	}
-}
-
 // Allows us to count up all the queue subscribers during close.
 type qsub struct {
 	sub *subscription
