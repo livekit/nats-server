@@ -3284,7 +3284,11 @@ func (s *Server) removeRoute(c *client) {
 		}
 		// This is for gateway code. Remove this route from a map that uses
 		// the route hash in combination with the pool index as the key.
-		if s.routesPoolSize > 1 {
+		// The key has to match the one addRoute stored: it appends the pool
+		// index only when the route has pooling support (the remote advertised
+		// RoutePoolSize > 0 and we did not treat it as a "no pool" remote), not
+		// based on our own pool size.
+		if !noPool {
 			idHash += strconv.Itoa(poolIdx)
 		}
 		s.removeRouteByHash(idHash)
