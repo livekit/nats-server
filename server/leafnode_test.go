@@ -1822,8 +1822,14 @@ func TestLeafNodeLoopDetectedOnAcceptSide(t *testing.T) {
 }
 
 func TestLeafNodeHubWithGateways(t *testing.T) {
+	// A and D are two independent leafnode clusters (each acting as a hub for
+	// its own leafnodes) that are connected through gateways. They must not
+	// share a cluster name: the cluster name is the identity used for "cluster
+	// wide no echo", and that identity is preserved across a gateway hop, so
+	// unrelated clusters with the same name would not exchange messages.
 	ao := DefaultOptions()
 	ao.ServerName = "A"
+	ao.Cluster.Name = "A"
 	ao.LeafNode.Host = "127.0.0.1"
 	ao.LeafNode.Port = -1
 	a := RunServer(ao)
@@ -1847,6 +1853,7 @@ func TestLeafNodeHubWithGateways(t *testing.T) {
 
 	do := DefaultOptions()
 	do.ServerName = "D"
+	do.Cluster.Name = "D"
 	do.LeafNode.Host = "127.0.0.1"
 	do.LeafNode.Port = -1
 	d := RunServer(do)

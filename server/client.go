@@ -4610,7 +4610,7 @@ func (c *client) processInboundClientMsg(msg []byte) (bool, bool) {
 			reply = append(slices.Clip(reply), '@')
 			reply = append(reply, c.pa.deliver...)
 		}
-		didDeliver = c.sendMsgToGateways(acc, msg, c.pa.subject, reply, qnames, false) || didDeliver
+		didDeliver = c.sendMsgToGateways(acc, msg, c.pa.subject, reply, qnames, false, false) || didDeliver
 	}
 
 	// Check to see if we did not deliver to anyone and the client has a reply subject set
@@ -4658,7 +4658,7 @@ func (c *client) handleGWReplyMap(msg []byte) bool {
 			reply = append(slices.Clip(reply), '@')
 			reply = append(reply, c.pa.deliver...)
 		}
-		c.sendMsgToGateways(c.acc, msg, c.pa.subject, reply, nil, false)
+		c.sendMsgToGateways(c.acc, msg, c.pa.subject, reply, nil, false, false)
 	}
 	return true
 }
@@ -5194,7 +5194,7 @@ func (c *client) processServiceImport(si *serviceImport, acc *Account, msg []byt
 			flags |= pmrCollectQueueNames
 			var queues [][]byte
 			didDeliver, queues = c.processMsgResults(siAcc, rr, msg, c.pa.deliver, []byte(to), nrr, flags)
-			didDeliver = c.sendMsgToGateways(siAcc, msg, []byte(to), nrr, queues, false) || didDeliver
+			didDeliver = c.sendMsgToGateways(siAcc, msg, []byte(to), nrr, queues, false, true) || didDeliver
 		} else {
 			didDeliver, _ = c.processMsgResults(siAcc, rr, msg, c.pa.deliver, []byte(to), nrr, flags)
 		}
@@ -5593,6 +5593,13 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 		}
 	case LEAF:
 		leafOrigin = c.remoteCluster()
+	case GATEWAY:
+		// A gateway peer may have carried the leafnode origin cluster from
+		// another cluster (see sendMsgToGateways). Keep it so that we do not
+		// send the message back down to the same leafnode cluster.
+		if len(c.pa.origin) > 0 {
+			leafOrigin = bytesToString(c.pa.origin)
+		}
 	}
 	// The leafnode cluster never published a service-imported message in this account.
 	if importedFromService {

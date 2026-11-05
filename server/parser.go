@@ -228,7 +228,7 @@ func (c *client) parse(buf []byte) error {
 					c.state = OP_R
 				}
 			case 'L', 'l':
-				if c.kind != LEAF && c.kind != ROUTER {
+				if c.kind != LEAF && c.kind != ROUTER && c.kind != GATEWAY {
 					goto parseErr
 				} else {
 					c.state = OP_L

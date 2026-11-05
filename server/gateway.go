@@ -216,6 +216,10 @@ type gateway struct {
 	// interest-only mode "immediately", so the outbound should disregard
 	// the optimistic mode when checking for interest.
 	interestOnlyMode bool
+	// If true, the remote gateway accepts a leafnode origin cluster in
+	// messages (LMSG protocol) so that origin-cluster identity survives
+	// the gateway hop.
+	originCluster bool
 	// Name of the remote server
 	remoteName string
 }
@@ -526,6 +530,7 @@ func (s *Server) startGatewayAcceptLoop() {
 		MaxPayload:   s.info.MaxPayload,
 		Gateway:      opts.Gateway.Name,
 		GatewayNRP:   true,
+		GatewayOC:    true,
 		Headers:      s.supportsHeaders(),
 		Proto:        s.getServerProto(),
 	}
@@ -1119,6 +1124,7 @@ func (c *client) processGatewayInfo(info *Info) {
 			// going to send now.
 			c.mu.Lock()
 			c.gw.interestOnlyMode = info.GatewayIOM
+			c.gw.originCluster = info.GatewayOC
 			c.sendGatewayConnect(opts)
 			c.Debugf("Gateway connect protocol sent to %q", gwName)
 			// Send INFO too
@@ -2535,7 +2541,7 @@ var subPool = &sync.Pool{
 // when processing service imports, then this boolean should be passes as `false`,
 // regardless if it is a LEAF connection or not.
 // <Invoked from any client connection's readLoop>
-func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgroups [][]byte, checkLeafQF bool) bool {
+func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgroups [][]byte, checkLeafQF, noOrigin bool) bool {
 	// We had some times when we were sending across a GW with no subject, and the other side would break
 	// due to parser error. These need to be fixed upstream but also double check here.
 	if len(subject) == 0 {
@@ -2556,6 +2562,19 @@ func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgr
 	gw.RUnlock()
 	if len(gws) == 0 {
 		return false
+	}
+
+	// Origin cluster of the message, if any. A message that entered the local
+	// cluster from a leafnode, or that was routed with its origin cluster, has
+	// to keep that identity across a gateway hop: the remote cluster uses it to
+	// suppress sending the message back down to the same leafnode cluster.
+	var origin string
+	if !noOrigin {
+		if len(c.pa.origin) > 0 {
+			origin = bytesToString(c.pa.origin)
+		} else if c.kind == LEAF {
+			origin = c.remoteCluster()
+		}
 	}
 
 	// Copy off original pa in case it changes.
@@ -2665,9 +2684,23 @@ func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgr
 		}
 
 		// Setup the message header.
+		// If the peer supports it, use a LMSG so that a leafnode origin
+		// cluster survives the gateway hop.
+		useOrigin := origin != "" && gwc.gw.originCluster
+		hasHeader := c.pa.hdr > 0
+		canReceiveHeader := gwc.headers
+		if useOrigin && hasHeader && !canReceiveHeader {
+			// Can't use LMSG if the remote can't handle the header bytes.
+			useOrigin = false
+		}
 		// Make sure we are an 'R' proto by default
 		c.msgb[0] = 'R'
 		mh := c.msgb[:msgHeadProtoLen]
+		if useOrigin {
+			c.msgb[0] = 'L'
+			mh = append(mh, origin...)
+			mh = append(mh, ' ')
+		}
 		mh = append(mh, accName...)
 		mh = append(mh, ' ')
 		mh = append(mh, subject...)
@@ -2686,10 +2719,17 @@ func (c *client) sendMsgToGateways(acc *Account, msg, subject, reply []byte, qgr
 			mh = append(mh, ' ')
 		}
 		// Headers
-		hasHeader := c.pa.hdr > 0
-		canReceiveHeader := gwc.headers
-
-		if hasHeader {
+		if useOrigin {
+			// LMSG always carries the header size field, even if there is
+			// no header, in which case it is "0".
+			if hasHeader {
+				mh = append(mh, c.pa.hdb...)
+			} else {
+				mh = append(mh, '0')
+			}
+			mh = append(mh, ' ')
+			mh = append(mh, c.pa.szb...)
+		} else if hasHeader {
 			if canReceiveHeader {
 				mh[0] = 'H'
 				mh = append(mh, c.pa.hdb...)
@@ -3020,7 +3060,7 @@ func (c *client) handleGatewayReply(msg []byte) (processed bool) {
 		// we now need to send the message with the real subject to
 		// gateways in case they have interest on that reply subject.
 		if !isServiceReply {
-			c.sendMsgToGateways(acc, msg, c.pa.subject, c.pa.reply, queues, false)
+			c.sendMsgToGateways(acc, msg, c.pa.subject, c.pa.reply, queues, false, false)
 		}
 	} else if c.kind == GATEWAY {
 		// Only if we are a gateway connection should we try to route

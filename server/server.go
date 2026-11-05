@@ -158,6 +158,7 @@ type Info struct {
 	GatewayCmdPayload []byte   `json:"gateway_cmd_payload,omitempty"` // Command payload when needed
 	GatewayNRP        bool     `json:"gateway_nrp,omitempty"`         // Uses the _GR_. prefix for mapped replies
 	GatewayIOM        bool     `json:"gateway_iom,omitempty"`         // Indicate that all accounts will be switched to InterestOnly mode "right away"
+	GatewayOC         bool     `json:"gateway_oc,omitempty"`          // Supports carrying a leafnode origin cluster in gateway messages
 
 	// LeafNode Specific
 	LeafNodeURLs []string `json:"leafnode_urls,omitempty"` // LeafNode URLs that the server can reconnect to.

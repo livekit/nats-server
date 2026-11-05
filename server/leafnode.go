@@ -3561,7 +3561,7 @@ func (c *client) processInboundLeafMsg(msg []byte) {
 
 	// Now deal with gateways
 	if c.srv.gateway.enabled {
-		c.sendMsgToGateways(acc, msg, c.pa.subject, c.pa.reply, qnames, true)
+		c.sendMsgToGateways(acc, msg, c.pa.subject, c.pa.reply, qnames, true, false)
 	}
 }
 

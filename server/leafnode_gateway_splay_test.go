@@ -18,6 +18,8 @@ import (
 	"net/url"
 	"testing"
 	"time"
+
+	"github.com/nats-io/nats.go"
 )
 
 // A leafnode cluster splayed across two gateway regions. Each leaf server
@@ -118,5 +120,80 @@ func TestLeafNodeSplayedAcrossGatewaysNoDuplicateDelivery(t *testing.T) {
 		if n := seen[fmt.Sprintf("%d", i)]; n != 1 {
 			t.Fatalf("Message %d was delivered %d times", i, n)
 		}
+	}
+}
+
+// A message that enters a gateway cluster from a leafnode has to keep its
+// origin cluster across the gateway hop (so that it is not echoed back to a
+// leafnode cluster of the same name), but it must of course still be delivered
+// to subscribers on the far side, with or without headers.
+func TestLeafNodeOriginClusterDeliveryAcrossGateway(t *testing.T) {
+	SetGatewaysSolicitDelay(0)
+	defer ResetGatewaysSolicitDelay()
+
+	withSystemAccount := func(o *Options) {
+		o.Accounts = []*Account{NewAccount("SYS")}
+		o.SystemAccount = "SYS"
+	}
+
+	ao := testDefaultOptionsForGateway("A")
+	ao.ServerName = "A"
+	ao.LeafNode.Host = "127.0.0.1"
+	ao.LeafNode.Port = -1
+	withSystemAccount(ao)
+	a := runGatewayServer(ao)
+	defer a.Shutdown()
+	ua, _ := url.Parse(fmt.Sprintf("nats://127.0.0.1:%d", ao.LeafNode.Port))
+
+	bo := testGatewayOptionsFromToWithServers(t, "B", "A", a)
+	bo.ServerName = "B"
+	withSystemAccount(bo)
+	b := runGatewayServer(bo)
+	defer b.Shutdown()
+
+	o1 := DefaultOptions()
+	o1.ServerName = "leaf1"
+	o1.Cluster.Name = "leafcluster"
+	o1.LeafNode.Remotes = []*RemoteLeafOpts{{URLs: []*url.URL{ua}}}
+	leaf1 := RunServer(o1)
+	defer leaf1.Shutdown()
+
+	checkLeafNodeConnected(t, leaf1)
+	checkLeafNodeConnected(t, a)
+	waitForOutboundGateways(t, b, 1, 2*time.Second)
+	waitForInboundGateways(t, a, 1, 2*time.Second)
+
+	ncSub := natsConnect(t, b.ClientURL())
+	defer ncSub.Close()
+	sub := natsSubSync(t, ncSub, "foo")
+	natsFlush(t, ncSub)
+	checkGWInterestOnlyModeInterestOn(t, a, "B", globalAccountName, "foo")
+
+	ncPub := natsConnect(t, leaf1.ClientURL())
+	defer ncPub.Close()
+	natsPub(t, ncPub, "foo", []byte("hello"))
+	natsFlush(t, ncPub)
+
+	msg := natsNexMsg(t, sub, 2*time.Second)
+	if string(msg.Data) != "hello" {
+		t.Fatalf("Unexpected data: %q", msg.Data)
+	}
+
+	// Same, but with a header so that the origin-cluster message has a
+	// non-zero header size.
+	hm := nats.NewMsg("foo")
+	hm.Header.Set("X-Test", "yes")
+	hm.Data = []byte("with-header")
+	if err := ncPub.PublishMsg(hm); err != nil {
+		t.Fatalf("Error on publish: %v", err)
+	}
+	natsFlush(t, ncPub)
+
+	msg = natsNexMsg(t, sub, 2*time.Second)
+	if string(msg.Data) != "with-header" {
+		t.Fatalf("Unexpected data: %q", msg.Data)
+	}
+	if v := msg.Header.Get("X-Test"); v != "yes" {
+		t.Fatalf("Header not delivered: %q", v)
 	}
 }
