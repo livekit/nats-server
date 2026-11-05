@@ -2636,6 +2636,7 @@ func (s *Server) initLeafNodeSmapAndSendSubs(c *client) {
 	subs := _subs[:0]
 	ims := []string{}
 	mappingSrcs := []string{}
+	siIms := []string{}
 
 	// Block interest removals for the duration of the snapshot so that the
 	// sublist we read and the deltas the new leaf will receive are ordered
@@ -2675,16 +2676,25 @@ func (s *Server) initLeafNodeSmapAndSendSubs(c *client) {
 	// Check if we have an existing service import reply.
 	siReply := copyBytes(acc.siReply)
 
-	// Since leaf nodes only send on interest, if the bound
-	// account has import services we need to send those over.
+	// Since leaf nodes only send on interest, if the bound account has import
+	// services we need to send those over. Note that a service import also has
+	// a subscription in the account sublist (addServiceImportSub creates one on
+	// the account's internal client for the import's local subject), so the
+	// snapshot below contributes it too, unless the leafnode permissions
+	// filtered it out. Only account here for the imports that the snapshot
+	// skipped: adding every import again used to make the count 2 for a single
+	// import, while a leaf connected after the import was added counted 1.
+	// Removing the import only withdraws its subscription, so the extra unit
+	// never crossed zero, no LS- was sent, and the remote kept phantom
+	// interest.
 	for isubj := range acc.imports.services {
 		if c.isSpokeLeafNode() && !c.canSubscribe(isubj) {
 			c.Debugf("Not permitted to import service %q on behalf of %s%s", isubj, accName, accNTag)
 			continue
 		}
-		ims = append(ims, isubj)
+		siIms = append(siIms, isubj)
 	}
-	// Likewise for mappings.
+	// Likewise for mappings, which have no subscription in the account sublist.
 	for _, m := range acc.mappings {
 		if c.isSpokeLeafNode() && !c.canSubscribe(m.src) {
 			c.Debugf("Not permitted to import mapping %q on behalf of %s%s", m.src, accName, accNTag)
@@ -2738,6 +2748,8 @@ func (s *Server) initLeafNodeSmapAndSendSubs(c *client) {
 	rc := c.leaf.remoteCluster
 	c.leaf.smap = make(map[string]int64)
 	c.leaf.msrcs = nil
+	// Service import subjects whose subscription was counted in this snapshot.
+	var siCounted map[string]struct{}
 	for _, sub := range subs {
 		// Don't advertise interest from leafnodes to this isolated leafnode connection.
 		if isIsolated && (sub.client.kind == LEAF || sub.leaf) {
@@ -2756,7 +2768,16 @@ func (s *Server) initLeafNodeSmapAndSendSubs(c *client) {
 			if len(sub.queue) > 0 && sub.qw > 0 {
 				count = int64(sub.qw)
 			}
-			c.leaf.smap[keyFromSub(sub)] += count
+			key := keyFromSub(sub)
+			c.leaf.smap[key] += count
+			// Remember the service import subscriptions that this snapshot
+			// counted so that we do not add them a second time below.
+			if sub.si {
+				if siCounted == nil {
+					siCounted = make(map[string]struct{}, 4)
+				}
+				siCounted[key] = struct{}{}
+			}
 			if c.leaf.tsub == nil {
 				c.leaf.tsub = make(map[*subscription]int64)
 			}
@@ -2764,6 +2785,13 @@ func (s *Server) initLeafNodeSmapAndSendSubs(c *client) {
 		}
 	}
 	// FIXME(dlc) - We need to update appropriately on an account claims update.
+	for _, isubj := range siIms {
+		if _, ok := siCounted[isubj]; ok {
+			// Already counted through the import's subscription.
+			continue
+		}
+		c.leaf.smap[isubj]++
+	}
 	for _, isubj := range ims {
 		c.leaf.smap[isubj]++
 	}
