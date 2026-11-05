@@ -43,6 +43,10 @@ func (s *Server) handleSignals() {
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR1, syscall.SIGUSR2, syscall.SIGHUP)
 
 	go func() {
+		// Restore the default signal disposition once the server is shut
+		// down (quitCh closed), so that a process embedding the server does
+		// not keep swallowing the signals it no longer handles.
+		defer signal.Stop(c)
 		for {
 			select {
 			case sig := <-c:
