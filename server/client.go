@@ -6356,15 +6356,26 @@ func (c *client) processSubsOnConfigReload(awcsti map[string]struct{}) {
 		sub.shadow = nil
 		c.mu.Unlock()
 		c.addShadowSubscriptions(acc, sub)
+		// addShadowSubscriptions releases the client lock while it creates and
+		// inserts the new shadows and only attaches them to sub at the end. An
+		// UNSUB or auto-unsub that lands in that window sees a nil shadow
+		// handle, removes nothing and closes the sub, so the shadows we just
+		// created belong to a subscription that no longer exists and nothing
+		// else will ever clean them up. Detect that under the client lock, take
+		// the handle back and withdraw exactly what was added.
+		c.mu.Lock()
+		newShadows := sub.shadow
+		if newShadows != nil && (sub.isClosed() || c.subs[string(sub.sid)] != sub) {
+			sub.shadow = nil
+		} else {
+			newShadows = nil
+		}
+		c.mu.Unlock()
 		for _, nsub := range oldShadows {
-			if err := nsub.im.acc.sl.Remove(nsub); err != nil {
-				c.Debugf("Could not remove shadow import subscription for account %q", nsub.im.acc.Name)
-			}
-			if updateRoute {
-				c.srv.updateRemoteSubscription(nsub.im.acc, nsub, -1)
-			} else if isSpokeLeaf {
-				nsub.im.acc.updateLeafNodesEx(nsub, -1, true)
-			}
+			c.removeShadowSub(nsub, updateRoute, isSpokeLeaf)
+		}
+		for _, nsub := range newShadows {
+			c.removeShadowSub(nsub, updateRoute, isSpokeLeaf)
 		}
 	}
 
@@ -6378,6 +6389,19 @@ func (c *client) processSubsOnConfigReload(awcsti map[string]struct{}) {
 			c.sendErr(fmt.Sprintf("Permissions Violation for Subscription to %q (sid %q)", sub.subject, sub.sid))
 			srv.Noticef("Removed sub %q (sid %q) for %s - not authorized", sub.subject, sub.sid, c.getAuthUser())
 		}
+	}
+}
+
+// removeShadowSub removes a shadow subscription from its exporting account and
+// withdraws the interest that was announced for it, mirroring unsubscribe.
+func (c *client) removeShadowSub(nsub *subscription, updateRoute, isSpokeLeaf bool) {
+	if err := nsub.im.acc.sl.Remove(nsub); err != nil {
+		c.Debugf("Could not remove shadow import subscription for account %q", nsub.im.acc.Name)
+	}
+	if updateRoute {
+		c.srv.updateRemoteSubscription(nsub.im.acc, nsub, -1)
+	} else if isSpokeLeaf {
+		nsub.im.acc.updateLeafNodesEx(nsub, -1, true)
 	}
 }
 
