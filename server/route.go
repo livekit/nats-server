@@ -1711,6 +1711,7 @@ func (c *client) processRemoteSub(argo []byte, leafSub, hasOrigin bool) (err err
 	// We use the sub.sid for the key of the c.subs map.
 	key := bytesToString(sub.sid)
 	osub := c.subs[key]
+	var qwSub *subscription
 	if osub == nil {
 		c.subs[key] = sub
 		// Now place into the account sl.
@@ -1726,6 +1727,7 @@ func (c *client) processRemoteSub(argo []byte, leafSub, hasOrigin bool) (err err
 		delta = sub.qw - atomic.LoadInt32(&osub.qw)
 		atomic.StoreInt32(&osub.qw, sub.qw)
 		sl.UpdateRemoteQSub(osub)
+		qwSub = osub
 	} else {
 		// If RS+ for a sub that we already have, ignore.
 		c.mu.Unlock()
@@ -1738,7 +1740,11 @@ func (c *client) processRemoteSub(argo []byte, leafSub, hasOrigin bool) (err err
 	}
 
 	// Now check on leafnode updates.
-	acc.updateLeafNodes(sub, delta)
+	if qwSub != nil {
+		acc.updateLeafNodesForWeight(qwSub, delta)
+	} else {
+		acc.updateLeafNodes(sub, delta)
+	}
 
 	if c.opts.Verbose {
 		c.sendOK()
