@@ -1980,7 +1980,19 @@ func (s *Server) connsRequest(sub *subscription, c *client, _ *Account, subject,
 func (s *Server) leafNodeConnected(sub *subscription, _ *client, _ *Account, subject, reply string, hdr, msg []byte) {
 	m := accNumConnsReq{}
 	if err := json.Unmarshal(msg, &m); err != nil {
-		s.sys.client.Errorf("Error unmarshalling account connections request message: %v", err)
+		// This handler runs deferred on the system receive queue, so eventing
+		// may already have been torn down (s.sys == nil) when the message is
+		// dispatched. Capture the system client under the lock and skip the
+		// report if it is gone.
+		s.mu.RLock()
+		var sysc *client
+		if s.sys != nil {
+			sysc = s.sys.client
+		}
+		s.mu.RUnlock()
+		if sysc != nil {
+			sysc.Errorf("Error unmarshalling account connections request message: %v", err)
+		}
 		return
 	}
 
