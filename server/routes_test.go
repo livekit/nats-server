@@ -6053,3 +6053,119 @@ func TestRouteLogsRemoteURL(t *testing.T) {
 	s2.Shutdown()
 	checkNoticeNotContains(t, l, remoteURLLogUser, remoteURLLogPassword)
 }
+
+// techB1PoolConf builds a config for a pooled-route server. pool<=0 omits
+// pool_size (the default, 3), pinned empty omits cluster.accounts.
+func techB1PoolConf(name, routes string, pool int, pinned string) string {
+	ps, accs := _EMPTY_, _EMPTY_
+	if pool > 0 {
+		ps = fmt.Sprintf("pool_size: %d", pool)
+	}
+	if pinned != _EMPTY_ {
+		accs = fmt.Sprintf("accounts: %s", pinned)
+	}
+	return fmt.Sprintf(`
+		port: -1
+		server_name: %q
+		accounts {
+			A { users: [{user: "A", password: "pwd"}] }
+			B { users: [{user: "B", password: "pwd"}] }
+			C { users: [{user: "C", password: "pwd"}] }
+		}
+		cluster {
+			port: -1
+			name: "local"
+			%s
+			%s
+			%s
+		}
+		no_sys_acc: true
+	`, name, routes, ps, accs)
+}
+
+// techB1RouteLens reports, and returns, the per-remote route pool slice
+// lengths on a server, keyed by the remote's route ID.
+func techB1RouteLens(t *testing.T, s *Server, label string) map[string]int {
+	t.Helper()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	lens := make(map[string]int, len(s.routes))
+	for id, conns := range s.routes {
+		n := 0
+		for _, c := range conns {
+			if c != nil {
+				n++
+			}
+		}
+		lens[id] = len(conns)
+		t.Logf("%s: remote %s pool slice len=%d live=%d", label, id[:12], len(conns), n)
+	}
+	t.Logf("%s: routesPoolSize=%d remotes=%d", label, s.routesPoolSize, len(s.routes))
+	return lens
+}
+
+// techB1WaitRemotes waits until a server has n remotes and returns the slice
+// lengths.
+func techB1WaitRemotes(t *testing.T, s *Server, n int) map[string]int {
+	t.Helper()
+	var lens map[string]int
+	checkFor(t, 10*time.Second, 25*time.Millisecond, func() error {
+		s.mu.RLock()
+		got := len(s.routes)
+		s.mu.RUnlock()
+		if got != n {
+			return fmt.Errorf("expected %d remotes, got %d", n, got)
+		}
+		return nil
+	})
+	lens = techB1RouteLens(t, s, s.Name())
+	return lens
+}
+
+// TestTechB1RoutePoolIdxCrossRemotePanic is the candidate's primary repro:
+// mixed pool sizes (S1/S3 = 2, S2 = 5), S2 and S3 route to S1, then S2 reloads
+// with account A pinned. computeRoutePoolIdx(5, "A") == 2, and S1 applies
+// index 2 to every remote's slice, including its 2-entry slice for S3.
+func TestTechB1RoutePoolIdxCrossRemotePanic(t *testing.T) {
+	o1, o2, o3 := DefaultOptions(), DefaultOptions(), DefaultOptions()
+	o1.ServerName, o2.ServerName, o3.ServerName = "S1", "S2", "S3"
+
+	conf1 := createConfFile(t, []byte(techB1PoolConf("S1", _EMPTY_, 2, _EMPTY_)))
+	s1, o1 := RunServerWithConfig(conf1)
+	defer s1.Shutdown()
+	routeTo1 := fmt.Sprintf(`routes: ["nats://127.0.0.1:%d"]`, o1.Cluster.Port)
+
+	conf2 := createConfFile(t, []byte(techB1PoolConf("S2", routeTo1, 5, _EMPTY_)))
+	s2, _ := RunServerWithConfig(conf2)
+	defer s2.Shutdown()
+
+	conf3 := createConfFile(t, []byte(techB1PoolConf("S3", routeTo1, 2, _EMPTY_)))
+	s3, _ := RunServerWithConfig(conf3)
+	defer s3.Shutdown()
+
+	_ = o2
+	_ = o3
+
+	lens := techB1WaitRemotes(t, s1, 2)
+	two, five := 0, 0
+	for _, l := range lens {
+		switch l {
+		case 2:
+			two++
+		case 5:
+			five++
+		}
+	}
+	require_Equal(t, two, 1)
+	require_Equal(t, five, 1)
+	// Sanity: the account index that S2 will advertise.
+	require_Equal(t, computeRoutePoolIdx(5, "A"), 2)
+
+	reloadUpdateConfig(t, s2, conf2, techB1PoolConf("S2", routeTo1, 5, `["A"]`))
+
+	// On pinned main the server panics in its route read loop; if it survives,
+	// this assertion fails instead.
+	time.Sleep(500 * time.Millisecond)
+	require_True(t, s1.NumRoutes() > 0)
+	require_True(t, s3.NumRoutes() > 0)
+}
