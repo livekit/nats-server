@@ -6209,3 +6209,70 @@ func TestRoutePinnedAccountFullRollingReloadKeepsInterest(t *testing.T) {
 	checkSubInterest(t, srvc, "A", "foo", 2*time.Second)
 	send("after")
 }
+
+func TestRoutePinnedAccountTwoServerReloadKeepsInterest(t *testing.T) {
+	tmpl := `
+		port: -1
+		server_name: "%s"
+		accounts {
+			A { users: [{user: "u", password: "pwd"}] }
+		}
+		cluster {
+			name: "local"
+			listen: 127.0.0.1:-1
+			%s
+			pool_size: 3
+			%s
+		}
+	`
+	gen := func(name, routes, accs string) string {
+		return fmt.Sprintf(tmpl, name, routes, accs)
+	}
+	routeTo := func(port int) string {
+		return fmt.Sprintf("routes: [\"nats://127.0.0.1:%d\"]", port)
+	}
+
+	confA := createConfFile(t, []byte(gen("A", _EMPTY_, _EMPTY_)))
+	srva, optsA := RunServerWithConfig(confA)
+	defer srva.Shutdown()
+
+	confB := createConfFile(t, []byte(gen("B", routeTo(optsA.Cluster.Port), _EMPTY_)))
+	srvb, _ := RunServerWithConfig(confB)
+	defer srvb.Shutdown()
+
+	checkClusterFormed(t, srva, srvb)
+
+	ncSub := natsConnect(t, srva.ClientURL(), nats.UserInfo("u", "pwd"))
+	defer ncSub.Close()
+	sub := natsSubSync(t, ncSub, "foo")
+	natsFlush(t, ncSub)
+
+	ncPub := natsConnect(t, srvb.ClientURL(), nats.UserInfo("u", "pwd"))
+	defer ncPub.Close()
+
+	send := func(msg string) {
+		t.Helper()
+		natsPub(t, ncPub, "foo", []byte(msg))
+		if m := natsNexMsg(t, sub, 2*time.Second); string(m.Data) != msg {
+			t.Fatalf("Expected message %q, got %q", msg, m.Data)
+		}
+	}
+	checkSubInterest(t, srvb, "A", "foo", 2*time.Second)
+	send("before")
+
+	// Pin account A on the non-seed server only.
+	reloadUpdateConfig(t, srvb, confB, gen("B", routeTo(optsA.Cluster.Port), `accounts: ["A"]`))
+
+	checkFor(t, 5*time.Second, 25*time.Millisecond, func() error {
+		srvb.mu.RLock()
+		r := srvb.accRoutes["A"][srva.ID()]
+		srvb.mu.RUnlock()
+		if r == nil {
+			return fmt.Errorf("dedicated route for A not established")
+		}
+		return nil
+	})
+
+	checkSubInterest(t, srvb, "A", "foo", 2*time.Second)
+	send("after")
+}
