@@ -3392,9 +3392,31 @@ func (c *client) addShadowSubscriptions(acc *Account, sub *subscription) error {
 		shadow = make([]*subscription, 0, len(ims))
 	}
 
+	// Several imports of the same account may resolve to the same subject for
+	// this subscription (e.g. "foo.>" and "foo.bar" for a "foo.bar" sub). Each
+	// would create an equivalent shadow with the same subject and queue, which
+	// would deliver the message once per shadow and multiply the announced
+	// interest. Dedupe on what actually lands in the exporting account.
+	type shadowKey struct {
+		acc   *Account
+		subj  string
+		queue string
+	}
+	var seen map[shadowKey]struct{}
+
 	// Now walk through collected stream imports that matched.
 	for i := 0; i < len(ims); i++ {
 		ime := &ims[i]
+		if len(ims) > 1 {
+			key := shadowKey{ime.im.acc, string(ime.shadowSubject(sub.subject)), string(sub.queue)}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			if seen == nil {
+				seen = make(map[shadowKey]struct{}, len(ims))
+			}
+			seen[key] = struct{}{}
+		}
 		// We will create a shadow subscription.
 		nsub, err := c.addShadowSub(sub, ime)
 		if err != nil {
@@ -3412,6 +3434,30 @@ func (c *client) addShadowSubscriptions(acc *Account, sub *subscription) error {
 	return nil
 }
 
+// Returns the subject that the shadow subscription for this import match will
+// use in the exporting account. It depends only on the import and the match, so
+// it can be used to detect matches that resolve to the same shadow subject.
+func (ime *ime) shadowSubject(subject []byte) []byte {
+	im := ime.im
+	if !im.usePub && ime.dyn && im.tr != nil {
+		if im.rtr == nil {
+			im.rtr = im.tr.reverse()
+		}
+		s := bytesToString(subject)
+		if ime.overlapSubj != _EMPTY_ {
+			s = ime.overlapSubj
+		}
+		return []byte(im.rtr.TransformSubject(s))
+	} else if !im.usePub || (im.usePub && ime.overlapSubj != _EMPTY_) || !ime.dyn {
+		if ime.overlapSubj != _EMPTY_ {
+			return []byte(ime.overlapSubj)
+		}
+		return []byte(im.from)
+	}
+	// Else use original subject
+	return subject
+}
+
 // Add in the shadow subscription.
 func (c *client) addShadowSub(sub *subscription, ime *ime) (*subscription, error) {
 	c.mu.Lock()
@@ -3423,26 +3469,7 @@ func (c *client) addShadowSub(sub *subscription, ime *ime) (*subscription, error
 	// A leafnode subscription's origin cluster only applies to its own account. The shadow is interest in another
 	// account, which that cluster's leaf links never saw, so it must not carry the origin to leafnodes or routes.
 	nsub.origin = nil
-
-	if !im.usePub && ime.dyn && im.tr != nil {
-		if im.rtr == nil {
-			im.rtr = im.tr.reverse()
-		}
-		s := bytesToString(nsub.subject)
-		if ime.overlapSubj != _EMPTY_ {
-			s = ime.overlapSubj
-		}
-		subj := im.rtr.TransformSubject(s)
-
-		nsub.subject = []byte(subj)
-	} else if !im.usePub || (im.usePub && ime.overlapSubj != _EMPTY_) || !ime.dyn {
-		if ime.overlapSubj != _EMPTY_ {
-			nsub.subject = []byte(ime.overlapSubj)
-		} else {
-			nsub.subject = []byte(im.from)
-		}
-	}
-	// Else use original subject
+	nsub.subject = ime.shadowSubject(nsub.subject)
 
 	c.Debugf("Creating import subscription on %q from account %q", nsub.subject, im.acc.Name)
 
