@@ -110,12 +110,16 @@ func TestDebugSubscribersDuringShutdownEventing(t *testing.T) {
 	s.sendShutdownEvent()
 	acc.mu.Unlock()
 
-	// The handler must complete without panicking and the client must get its
-	// PONG (which is processed only after the handler returns).
+	// PONG confirms that the client read loop read the request and queued it on
+	// the system receive queue (a panic in the deferred handler is the failure
+	// mode this test is looking for).
 	if err := readPong(5 * time.Second); err != nil {
-		t.Fatalf("Error waiting for handler completion: %v", err)
+		t.Fatalf("Error waiting for the request to be queued: %v", err)
 	}
 
 	s.Shutdown()
 	s.WaitForShutdown()
+	// Give the internal receive loop a chance to dispatch the request against
+	// the torn-down eventing state before the test binary can exit.
+	time.Sleep(50 * time.Millisecond)
 }
