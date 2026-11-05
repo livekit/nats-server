@@ -3139,6 +3139,14 @@ func (s *Server) debugSubscribers(sub *subscription, c *client, _ *Account, subj
 	done := make(chan (bool))
 
 	s.mu.Lock()
+	// If we are shutting down, eventing may already have been torn down and
+	// the reply map unhooked (sendShutdownEvent). Don't register a handler in
+	// that case, the reply would never be delivered anyway.
+	if s.sys == nil || s.sys.replies == nil {
+		s.mu.Unlock()
+		s.sendInternalAccountMsg(nil, reply, nsubs)
+		return
+	}
 	// Create direct reply inbox that we multiplex under the WC replies.
 	replySubj := s.newRespInbox()
 	// Store our handler.
