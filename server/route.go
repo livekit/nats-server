@@ -642,19 +642,24 @@ func (c *client) processRouteInfo(info *Info) {
 					acc.routePoolIdx = accTransitioningToDedicatedRoute
 				}
 				acc.mu.Unlock()
-				// Since v2.11.0, we support remotes with a different pool size
-				// (for rolling upgrades), so we need to use the remote route
-				// pool index (based on the remote configured pool size) since
-				// the remote subscriptions will be attached to the route at
-				// that index, not at our account's route pool index. But we
-				// need to compute only if rpi is negative or the pool sizes
-				// are different.
-				if rpi <= 0 || info.RoutePoolSize != s.routesPoolSize {
-					rpi = computeRoutePoolIdx(info.RoutePoolSize, an)
-				}
-				// Go over each remote's route at pool index `rpi` and remove
-				// remote subs for this account.
-				s.forEachRouteIdx(rpi, func(r *client) bool {
+				// Only the remote that sent this INFO is transitioning to a
+				// per-account route for this account. The interest we learned
+				// from it over the pooled route has to be removed (it will be
+				// re-sent on the dedicated route), but the interest learned
+				// from the other remotes still travels over their pooled
+				// routes and must be left alone. Removing it from every
+				// remote's slice silently drops the account's interest
+				// between two servers that are both merely observing this
+				// transition.
+				//
+				// Iterate over the sender's connections rather than a single
+				// pool index because the pooled index we use for the sender
+				// depends on its advertised pool size, which may differ from
+				// ours during a rolling upgrade.
+				for _, r := range s.routes[remoteID] {
+					if r == nil {
+						continue
+					}
 					r.mu.Lock()
 					// Exclude routes to servers that don't support pooling.
 					if !r.route.noPool {
@@ -663,8 +668,7 @@ func (c *client) processRouteInfo(info *Info) {
 						}
 					}
 					r.mu.Unlock()
-					return true
-				})
+				}
 				// Respond to the remote by clearing the RouteAccount field.
 				info.RouteAccount = _EMPTY_
 				proto := generateInfoJSON(info)
@@ -1233,6 +1237,13 @@ func (s *Server) forwardNewRouteInfoToKnownServers(info *Info, rtype RouteType, 
 	})
 }
 
+// Returns true if the given remote has a dedicated route for this account.
+// Account lock must be held on entry.
+func (a *Account) routeDedicatedRemote(remoteID string) bool {
+	_, ok := a.routeDedicatedRemotes[remoteID]
+	return ok
+}
+
 // canImport is whether or not we will send a SUB for interest to the other side.
 // This is for ROUTER connections only.
 // Lock is held on entry.
@@ -1699,7 +1710,8 @@ func (c *client) processRemoteSub(argo []byte, leafSub, hasOrigin bool) (err err
 	// per-account route (route.poolIdx >= 0). If so, ignore this subscription.
 	// Exclude "no pool" routes from this check.
 	if c.kind == ROUTER && !c.route.noPool &&
-		acc.routePoolIdx == accTransitioningToDedicatedRoute && c.route.poolIdx >= 0 {
+		acc.routePoolIdx == accTransitioningToDedicatedRoute && c.route.poolIdx >= 0 &&
+		acc.routeDedicatedRemote(c.route.remoteID) {
 		acc.mu.RUnlock()
 		c.mu.Unlock()
 		// Do not return an error, which would cause the connection to be closed.
@@ -1810,11 +1822,13 @@ func (c *client) addRouteSubOrUnsubProtoToBuf(buf []byte, accName string, sub *s
 // Server lock held on entry.
 func (s *Server) sendSubsToRoute(route *client, idx int, account string) {
 	var noPool bool
+	var remoteID string
 	if idx >= 0 {
 		// We need to check if this route is "no_pool" in which case we
 		// need to select all accounts.
 		route.mu.Lock()
 		noPool = route.route.noPool
+		remoteID = route.route.remoteID
 		route.mu.Unlock()
 	}
 	// Estimated size of all protocols. It does not have to be accurate at all.
@@ -1856,7 +1870,11 @@ func (s *Server) sendSubsToRoute(route *client, idx int, account string) {
 			// So we collect all accounts whose routePoolIdx matches the
 			// one for this route, or only the account provided, or all
 			// accounts if dealing with a "no pool" route.
-			if a.routePoolIdx == idx || noPool {
+			// An account that is transitioning to a dedicated route but
+			// has no dedicated route (yet) for this remote still carries
+			// its interest over this pooled route.
+			if a.routePoolIdx == idx || noPool ||
+				(a.routePoolIdx == accTransitioningToDedicatedRoute && !a.routeDedicatedRemote(remoteID)) {
 				estimateProtosSize(a, true)
 				accs = append(accs, a)
 			}
@@ -2249,6 +2267,14 @@ func (s *Server) addRoute(c *client, didSolicit, sendDelayedInfo bool, gossipMod
 				c.acc = acc
 			}
 			c.mu.Unlock()
+			if acc != nil {
+				acc.mu.Lock()
+				if acc.routeDedicatedRemotes == nil {
+					acc.routeDedicatedRemotes = make(map[string]struct{})
+				}
+				acc.routeDedicatedRemotes[id] = struct{}{}
+				acc.mu.Unlock()
+			}
 
 			// Store this route with key being the route id hash + account name
 			s.storeRouteByHash(idHash+accName, c)
@@ -2662,6 +2688,34 @@ func (s *Server) updateRouteSubscriptionMap(acc *Account, sub *subscription, del
 		if conns, ok := s.accRoutes[acc.Name]; ok {
 			for _, r := range conns {
 				routes = append(routes, r)
+			}
+		}
+		if poolIdx == accTransitioningToDedicatedRoute {
+			// Partial pinned reload: this server is still transitioning and
+			// only some of the remotes have a dedicated route for the account.
+			// Remotes with no dedicated route still carry its interest over
+			// the pooled route, so send there too instead of dropping it.
+			dedicated := s.accRoutes[acc.Name]
+			localIdx := computeRoutePoolIdx(s.routesPoolSize, acc.Name)
+			for remote, conns := range s.routes {
+				if dedicated[remote] != nil {
+					continue
+				}
+				var r *client
+				if localIdx >= 0 && localIdx < len(conns) {
+					r = conns[localIdx]
+				}
+				if r != nil {
+					routes = append(routes, r)
+				} else if s.routesNoPool > 0 && len(conns) > 0 {
+					if r := conns[0]; r != nil {
+						r.mu.Lock()
+						if r.route.noPool {
+							routes = append(routes, r)
+						}
+						r.mu.Unlock()
+					}
+				}
 			}
 		}
 		if s.routesNoPool > 0 {
@@ -3215,6 +3269,12 @@ func (s *Server) removeRoute(c *client) {
 			if r := conns[rID]; r == c {
 				s.removeRouteByHash(idHash + accName)
 				delete(conns, rID)
+				if ai, ok := s.accounts.Load(accName); ok {
+					acc := ai.(*Account)
+					acc.mu.Lock()
+					delete(acc.routeDedicatedRemotes, rID)
+					acc.mu.Unlock()
+				}
 				// Do not remove or set to nil when all remotes have been
 				// removed from the map. The configured accounts must always
 				// be in the accRoutes map and addRoute expects "conns" map

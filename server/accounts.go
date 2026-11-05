@@ -107,6 +107,12 @@ type Account struct {
 	nameTag      string
 	lastLimErr   int64
 	routePoolIdx int
+	// Remotes that have a dedicated route for this account. Used while
+	// routePoolIdx is accTransitioningToDedicatedRoute to know whether a
+	// subscription arriving on a pooled route has to be ignored (the remote
+	// already has a dedicated route) or kept (the remote still uses pooling).
+	// Guarded by the account's lock.
+	routeDedicatedRemotes map[string]struct{}
 	// If the trace destination is specified and a message with a traceParentHdr
 	// is received, and has the least significant bit of the last token set to 1,
 	// then if traceDestSampling is > 0 and < 100, a random value will be selected

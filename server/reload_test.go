@@ -8065,3 +8065,351 @@ func TestConfigReloadDuringStartupWithJetStream(t *testing.T) {
 		}()
 	}
 }
+
+// ---------------------------------------------------------------------------
+// tech-b1, ticket 0003: a partial pinned-account reload (-2 on the receiving
+// servers, never reset) removes the account's interest from the pooled route
+// between the two non-reloading servers.
+
+const techB1PinnedTmpl = `
+	port: -1
+	server_name: %q
+	accounts {
+		A { users: [{user: "user1", password: "pwd"}] }
+		B { users: [{user: "user2", password: "pwd"}] }
+	}
+	no_sys_acc: true
+	cluster {
+		name: "local"
+		listen: 127.0.0.1:-1
+		pool_size: 3
+		%s
+		%s
+	}
+`
+
+func techB1PinnedConf(name, routes, pinned string) string {
+	return fmt.Sprintf(techB1PinnedTmpl, name, routes, pinned)
+}
+
+func techB1RoutePoolIdxOf(t *testing.T, s *Server, accName string) int {
+	t.Helper()
+	acc, err := s.LookupAccount(accName)
+	if err != nil || acc == nil {
+		t.Fatalf("account %q not found on %s: %v", accName, s.Name(), err)
+	}
+	acc.mu.RLock()
+	defer acc.mu.RUnlock()
+	return acc.routePoolIdx
+}
+
+func techB1InterestCount(t *testing.T, s *Server, accName, subject string) int {
+	t.Helper()
+	acc, err := s.LookupAccount(accName)
+	if err != nil || acc == nil {
+		t.Fatalf("account %q not found on %s: %v", accName, s.Name(), err)
+	}
+	res := acc.sl.Match(subject)
+	return len(res.psubs) + len(res.qsubs)
+}
+
+// techB1PinnedCluster starts the 3-server base topology, with S2 reloading
+// account A. It returns the servers and S2's config path.
+func techB1PinnedCluster(t *testing.T) (s1, s2, s3 *Server, conf2 string) {
+	t.Helper()
+	s1, o1 := RunServerWithConfig(createConfFile(t, []byte(techB1PinnedConf("S1", _EMPTY_, _EMPTY_))))
+	t.Cleanup(s1.Shutdown)
+	routeTo1 := fmt.Sprintf(`routes: ["nats://127.0.0.1:%d"]`, o1.Cluster.Port)
+	conf2 = createConfFile(t, []byte(techB1PinnedConf("S2", routeTo1, _EMPTY_)))
+	s2, _ = RunServerWithConfig(conf2)
+	t.Cleanup(s2.Shutdown)
+	s3, _ = RunServerWithConfig(createConfFile(t, []byte(techB1PinnedConf("S3", routeTo1, _EMPTY_))))
+	t.Cleanup(s3.Shutdown)
+	checkClusterFormed(t, s1, s2, s3)
+	return s1, s2, s3, conf2
+}
+
+// TestTechB1PinnedPartialReloadInterestLoss is the independent repro: only S2
+// pins account A. S1 and S3 keep A's local interest, but the remote interest
+// each learned from the other over the S1<->S3 pooled route is removed and
+// never re-sent, and both stay at routePoolIdx -2.
+func TestTechB1PinnedPartialReloadInterestLoss(t *testing.T) {
+	s1, s2, s3, conf2 := techB1PinnedCluster(t)
+
+	ncS1 := natsConnect(t, s1.ClientURL(), nats.UserInfo("user1", "pwd"))
+	defer ncS1.Close()
+	subFoo := natsSubSync(t, ncS1, "foo")
+	ncS3 := natsConnect(t, s3.ClientURL(), nats.UserInfo("user1", "pwd"))
+	defer ncS3.Close()
+	subBar := natsSubSync(t, ncS3, "bar")
+	natsFlush(t, ncS1)
+	natsFlush(t, ncS3)
+
+	// Pre-reload: interest and delivery both ways between S1 and S3.
+	checkSubInterest(t, s3, "A", "foo", 2*time.Second)
+	checkSubInterest(t, s1, "A", "bar", 2*time.Second)
+	natsPub(t, ncS3, "foo", []byte("pre"))
+	natsNexMsg(t, subFoo, 2*time.Second)
+	natsPub(t, ncS1, "bar", []byte("pre"))
+	natsNexMsg(t, subBar, 2*time.Second)
+
+	routesBefore := []int{s1.NumRoutes(), s2.NumRoutes(), s3.NumRoutes()}
+
+	// Only S2 reloads with account A pinned.
+	reloadUpdateConfig(t, s2, conf2, techB1PinnedConf("S2",
+		fmt.Sprintf(`routes: ["nats://127.0.0.1:%d"]`, s1.opts.Cluster.Port), `accounts: ["A"]`))
+
+	// The reload returns after the remotes confirmed the transition.
+	idxS1Now, idxS3Now := techB1RoutePoolIdxOf(t, s1, "A"), techB1RoutePoolIdxOf(t, s3, "A")
+	// Settle: the dedicated routes are up and nothing resets the index.
+	// S2 solicits per-account routes only on its configured routes (S1), so
+	// the dedicated A route appears on S1; S3 has no dedicated A route at all.
+	checkFor(t, 2*time.Second, 50*time.Millisecond, func() error {
+		s1.mu.RLock()
+		n := len(s1.accRoutes["A"])
+		s1.mu.RUnlock()
+		if n != 1 {
+			return fmt.Errorf("S1 per-account routes for A: %d", n)
+		}
+		return nil
+	})
+	s1.mu.RLock()
+	s2.mu.RLock()
+	s3.mu.RLock()
+	accRoutes := fmt.Sprintf("dedicated A routes: S1=%d S2=%d S3=%d",
+		len(s1.accRoutes["A"]), len(s2.accRoutes["A"]), len(s3.accRoutes["A"]))
+	s3.mu.RUnlock()
+	s2.mu.RUnlock()
+	s1.mu.RUnlock()
+	t.Log(accRoutes)
+	time.Sleep(500 * time.Millisecond)
+	idxS1Settled, idxS3Settled := techB1RoutePoolIdxOf(t, s1, "A"), techB1RoutePoolIdxOf(t, s3, "A")
+
+	intFooS3 := techB1InterestCount(t, s3, "A", "foo")
+	intBarS1 := techB1InterestCount(t, s1, "A", "bar")
+	intFooS1 := techB1InterestCount(t, s1, "A", "foo")
+	intBarS3 := techB1InterestCount(t, s3, "A", "bar")
+
+	routesAfter := []int{s1.NumRoutes(), s2.NumRoutes(), s3.NumRoutes()}
+
+	// Post-reload delivery across the still-up S1<->S3 route.
+	var gotFoo, gotBar bool
+	if m, err := subFoo.NextMsg(500 * time.Millisecond); err == nil && string(m.Data) == "post" {
+		gotFoo = true
+	}
+	natsPub(t, ncS3, "foo", []byte("post"))
+	if m, err := subFoo.NextMsg(500 * time.Millisecond); err == nil && string(m.Data) == "post" {
+		gotFoo = true
+	}
+	natsPub(t, ncS1, "bar", []byte("post"))
+	if m, err := subBar.NextMsg(500 * time.Millisecond); err == nil && string(m.Data) == "post" {
+		gotBar = true
+	}
+	natsFlush(t, ncS3)
+	natsFlush(t, ncS1)
+
+	t.Logf("routePoolIdx A: S1 now=%d settled=%d | S3 now=%d settled=%d (want -1 or >=0 for a healthy transition; -2 = %d)",
+		idxS1Now, idxS1Settled, idxS3Now, idxS3Settled, accTransitioningToDedicatedRoute)
+	t.Logf("interest A: S3/foo=%d (want 1) S1/bar=%d (want 1) [local: S1/foo=%d S3/bar=%d]",
+		intFooS3, intBarS1, intFooS1, intBarS3)
+	t.Logf("NumRoutes S1/S2/S3: before=%v after=%v", routesBefore, routesAfter)
+	t.Logf("delivery after reload: S3->S1 foo=%v S1->S3 bar=%v", gotFoo, gotBar)
+
+	require_Equal(t, idxS1Now, accTransitioningToDedicatedRoute)
+	require_Equal(t, idxS3Now, accTransitioningToDedicatedRoute)
+	require_Equal(t, idxS1Settled, accTransitioningToDedicatedRoute)
+	require_Equal(t, idxS3Settled, accTransitioningToDedicatedRoute)
+	require_Equal(t, intFooS3, 1)
+	require_Equal(t, intBarS1, 1)
+	// NumRoutes counts per-account routes too, so a pinned reload on S2
+	// legitimately adds the dedicated A route on S1 (6 -> 7). What must not
+	// change is the number of pooled routes: S3 (no dedicated route at all)
+	// keeps 6, and S1's two pooled slices stay 3 and 3 with every connection
+	// still up.
+	require_Equal(t, routesAfter[2], routesBefore[2])
+	require_Equal(t, routesAfter[0], routesBefore[0]+1)
+	s1.mu.RLock()
+	for remote, conns := range s1.routes {
+		require_Equal(t, len(conns), 3)
+		for _, r := range conns {
+			require_True(t, r != nil)
+		}
+		_ = remote
+	}
+	s1.mu.RUnlock()
+	require_True(t, gotFoo)
+	require_True(t, gotBar)
+}
+
+// TestTechB1PinnedTwoServerControl: with only two servers, pinning A on one
+// gives A a dedicated route between them; interest and delivery must survive.
+func TestTechB1PinnedTwoServerControl(t *testing.T) {
+	s1, o1 := RunServerWithConfig(createConfFile(t, []byte(techB1PinnedConf("S1", _EMPTY_, _EMPTY_))))
+	defer s1.Shutdown()
+	conf2 := createConfFile(t, []byte(techB1PinnedConf("S2",
+		fmt.Sprintf(`routes: ["nats://127.0.0.1:%d"]`, o1.Cluster.Port), _EMPTY_)))
+	s2, _ := RunServerWithConfig(conf2)
+	defer s2.Shutdown()
+	checkClusterFormed(t, s1, s2)
+
+	ncS1 := natsConnect(t, s1.ClientURL(), nats.UserInfo("user1", "pwd"))
+	defer ncS1.Close()
+	subFoo := natsSubSync(t, ncS1, "foo")
+	ncS2 := natsConnect(t, s2.ClientURL(), nats.UserInfo("user1", "pwd"))
+	defer ncS2.Close()
+	natsFlush(t, ncS1)
+	natsFlush(t, ncS2)
+	checkSubInterest(t, s2, "A", "foo", 2*time.Second)
+
+	reloadUpdateConfig(t, s2, conf2, techB1PinnedConf("S2",
+		fmt.Sprintf(`routes: ["nats://127.0.0.1:%d"]`, o1.Cluster.Port), `accounts: ["A"]`))
+	checkFor(t, 2*time.Second, 50*time.Millisecond, func() error {
+		s2.mu.RLock()
+		n := len(s2.accRoutes["A"])
+		s2.mu.RUnlock()
+		if n != 1 {
+			return fmt.Errorf("S2 per-account routes for A: %d", n)
+		}
+		return nil
+	})
+	checkSubInterest(t, s2, "A", "foo", 2*time.Second)
+	natsPub(t, ncS2, "foo", []byte("two"))
+	natsNexMsg(t, subFoo, 2*time.Second)
+}
+
+// TestTechB1PinnedAllServersControl: all three reload with A pinned, i.e. the
+// rolling upgrade result; interest between the non-seed pair must stay.
+func TestTechB1PinnedAllServersControl(t *testing.T) {
+	conf1 := createConfFile(t, []byte(techB1PinnedConf("S1", _EMPTY_, _EMPTY_)))
+	s1, o1 := RunServerWithConfig(conf1)
+	defer s1.Shutdown()
+	routeTo1 := fmt.Sprintf(`routes: ["nats://127.0.0.1:%d"]`, o1.Cluster.Port)
+	conf2 := createConfFile(t, []byte(techB1PinnedConf("S2", routeTo1, _EMPTY_)))
+	s2, _ := RunServerWithConfig(conf2)
+	defer s2.Shutdown()
+	conf3 := createConfFile(t, []byte(techB1PinnedConf("S3", routeTo1, _EMPTY_)))
+	s3, _ := RunServerWithConfig(conf3)
+	defer s3.Shutdown()
+	checkClusterFormed(t, s1, s2, s3)
+
+	ncS1 := natsConnect(t, s1.ClientURL(), nats.UserInfo("user1", "pwd"))
+	defer ncS1.Close()
+	subFoo := natsSubSync(t, ncS1, "foo")
+	ncS3 := natsConnect(t, s3.ClientURL(), nats.UserInfo("user1", "pwd"))
+	defer ncS3.Close()
+	subBar := natsSubSync(t, ncS3, "bar")
+	natsFlush(t, ncS1)
+	natsFlush(t, ncS3)
+	checkSubInterest(t, s3, "A", "foo", 2*time.Second)
+	checkSubInterest(t, s1, "A", "bar", 2*time.Second)
+
+	reloadUpdateConfig(t, s1, conf1, techB1PinnedConf("S1", _EMPTY_, `accounts: ["A"]`))
+	reloadUpdateConfig(t, s2, conf2, techB1PinnedConf("S2", routeTo1, `accounts: ["A"]`))
+	reloadUpdateConfig(t, s3, conf3, techB1PinnedConf("S3", routeTo1, `accounts: ["A"]`))
+	t.Logf("routePoolIdx A: S1=%d S2=%d S3=%d",
+		techB1RoutePoolIdxOf(t, s1, "A"), techB1RoutePoolIdxOf(t, s2, "A"), techB1RoutePoolIdxOf(t, s3, "A"))
+
+	checkSubInterest(t, s3, "A", "foo", 2*time.Second)
+	checkSubInterest(t, s1, "A", "bar", 2*time.Second)
+	natsPub(t, ncS3, "foo", []byte("all"))
+	natsNexMsg(t, subFoo, 2*time.Second)
+	natsPub(t, ncS1, "bar", []byte("all"))
+	natsNexMsg(t, subBar, 2*time.Second)
+}
+
+// TestTechB1PinnedPartialReloadSymmetry reloads the seed server instead: with
+// only S1 pinned, the pair that loses A's interest is S2<->S3.
+func TestTechB1PinnedPartialReloadSymmetry(t *testing.T) {
+	conf1 := createConfFile(t, []byte(techB1PinnedConf("S1", _EMPTY_, _EMPTY_)))
+	s1, o1 := RunServerWithConfig(conf1)
+	defer s1.Shutdown()
+	routeTo1 := fmt.Sprintf(`routes: ["nats://127.0.0.1:%d"]`, o1.Cluster.Port)
+	conf2 := createConfFile(t, []byte(techB1PinnedConf("S2", routeTo1, _EMPTY_)))
+	s2, _ := RunServerWithConfig(conf2)
+	defer s2.Shutdown()
+	conf3 := createConfFile(t, []byte(techB1PinnedConf("S3", routeTo1, _EMPTY_)))
+	s3, _ := RunServerWithConfig(conf3)
+	defer s3.Shutdown()
+	checkClusterFormed(t, s1, s2, s3)
+
+	ncS2 := natsConnect(t, s2.ClientURL(), nats.UserInfo("user1", "pwd"))
+	defer ncS2.Close()
+	subFoo := natsSubSync(t, ncS2, "foo")
+	ncS3 := natsConnect(t, s3.ClientURL(), nats.UserInfo("user1", "pwd"))
+	defer ncS3.Close()
+	subBar := natsSubSync(t, ncS3, "bar")
+	natsFlush(t, ncS2)
+	natsFlush(t, ncS3)
+	checkSubInterest(t, s3, "A", "foo", 2*time.Second)
+	checkSubInterest(t, s2, "A", "bar", 2*time.Second)
+	natsPub(t, ncS3, "foo", []byte("pre"))
+	natsNexMsg(t, subFoo, 2*time.Second)
+	natsPub(t, ncS2, "bar", []byte("pre"))
+	natsNexMsg(t, subBar, 2*time.Second)
+
+	reloadUpdateConfig(t, s1, conf1, techB1PinnedConf("S1", _EMPTY_, `accounts: ["A"]`))
+	time.Sleep(500 * time.Millisecond)
+
+	idxS2, idxS3 := techB1RoutePoolIdxOf(t, s2, "A"), techB1RoutePoolIdxOf(t, s3, "A")
+	intFooS3 := techB1InterestCount(t, s3, "A", "foo")
+	intBarS2 := techB1InterestCount(t, s2, "A", "bar")
+
+	var gotFoo, gotBar bool
+	natsPub(t, ncS3, "foo", []byte("post"))
+	if m, err := subFoo.NextMsg(500 * time.Millisecond); err == nil && string(m.Data) == "post" {
+		gotFoo = true
+	}
+	natsPub(t, ncS2, "bar", []byte("post"))
+	if m, err := subBar.NextMsg(500 * time.Millisecond); err == nil && string(m.Data) == "post" {
+		gotBar = true
+	}
+
+	t.Logf("reload S1: routePoolIdx A S2=%d S3=%d; interest S3/foo=%d S2/bar=%d; delivery S3->S2 foo=%v S2->S3 bar=%v",
+		idxS2, idxS3, intFooS3, intBarS2, gotFoo, gotBar)
+	require_Equal(t, idxS2, accTransitioningToDedicatedRoute)
+	require_Equal(t, idxS3, accTransitioningToDedicatedRoute)
+	require_Equal(t, intFooS3, 1)
+	require_Equal(t, intBarS2, 1)
+	require_True(t, gotFoo)
+	require_True(t, gotBar)
+}
+
+// TestTechB1PinnedPartialReloadNewInterest covers interest created *after*
+// the partial reload. On pinned main the two observers stay at
+// routePoolIdx == -2 and this fails: the interest is published only over the
+// dedicated routes (updateRouteSubscriptionMap) and RS+ arriving on their
+// pooled route is dropped (processRemoteSub).
+func TestTechB1PinnedPartialReloadNewInterest(t *testing.T) {
+	s1, s2, s3, conf2 := techB1PinnedCluster(t)
+
+	ncS1 := natsConnect(t, s1.ClientURL(), nats.UserInfo("user1", "pwd"))
+	defer ncS1.Close()
+	ncS3 := natsConnect(t, s3.ClientURL(), nats.UserInfo("user1", "pwd"))
+	defer ncS3.Close()
+
+	reloadUpdateConfig(t, s2, conf2, techB1PinnedConf("S2",
+		fmt.Sprintf(`routes: ["nats://127.0.0.1:%d"]`, s1.opts.Cluster.Port), `accounts: ["A"]`))
+	checkFor(t, 2*time.Second, 50*time.Millisecond, func() error {
+		s1.mu.RLock()
+		n := len(s1.accRoutes["A"])
+		s1.mu.RUnlock()
+		if n != 1 {
+			return fmt.Errorf("S1 per-account routes for A: %d", n)
+		}
+		return nil
+	})
+	time.Sleep(300 * time.Millisecond)
+
+	// New interest on S1 after the reload.
+	natsSubSync(t, ncS1, "new")
+	natsFlush(t, ncS1)
+	// New interest on S3 after the reload.
+	natsSubSync(t, ncS3, "new3")
+	natsFlush(t, ncS3)
+
+	t.Logf("after reload: routePoolIdx A S1=%d S3=%d; interest S3/new=%d (want 1) S1/new3=%d (want 1)",
+		techB1RoutePoolIdxOf(t, s1, "A"), techB1RoutePoolIdxOf(t, s3, "A"),
+		techB1InterestCount(t, s3, "A", "new"), techB1InterestCount(t, s1, "A", "new3"))
+	require_Equal(t, techB1InterestCount(t, s3, "A", "new"), 1)
+	require_Equal(t, techB1InterestCount(t, s1, "A", "new3"), 1)
+}
