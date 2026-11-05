@@ -96,6 +96,11 @@ type leaf struct {
 	// we would add it a second time in the smap causing later unsub to suppress the LS-.
 	tsub  map[*subscription]struct{}
 	tsubt *time.Timer
+	// This map tracks the account mapping sources that this connection has
+	// announced in smap. It makes forceAddToSmap/forceRemoveFromSmap idempotent
+	// so that a mapping added while a subscription for the same subject exists
+	// contributes exactly one unit and a later removal takes back exactly one.
+	msrcs map[string]struct{}
 	// Selected compression mode, which may be different from the server configured mode.
 	compression string
 	// This is for GW map replies.
@@ -2625,6 +2630,7 @@ func (s *Server) initLeafNodeSmapAndSendSubs(c *client) {
 	_subs := [1024]*subscription{}
 	subs := _subs[:0]
 	ims := []string{}
+	mappingSrcs := []string{}
 
 	// Hold the client lock otherwise there can be a race and miss some subs.
 	c.mu.Lock()
@@ -2674,6 +2680,7 @@ func (s *Server) initLeafNodeSmapAndSendSubs(c *client) {
 			continue
 		}
 		ims = append(ims, m.src)
+		mappingSrcs = append(mappingSrcs, m.src)
 	}
 
 	// Create a unique subject that will be used for loop detection.
@@ -2719,6 +2726,7 @@ func (s *Server) initLeafNodeSmapAndSendSubs(c *client) {
 	// Now walk the results and add them to our smap
 	rc := c.leaf.remoteCluster
 	c.leaf.smap = make(map[string]int64)
+	c.leaf.msrcs = nil
 	for _, sub := range subs {
 		// Don't advertise interest from leafnodes to this isolated leafnode connection.
 		if isIsolated && (sub.client.kind == LEAF || sub.leaf) {
@@ -2747,6 +2755,14 @@ func (s *Server) initLeafNodeSmapAndSendSubs(c *client) {
 	// FIXME(dlc) - We need to update appropriately on an account claims update.
 	for _, isubj := range ims {
 		c.leaf.smap[isubj]++
+	}
+	// Remember which keys are the mapping contribution, so that late add/remove
+	// of a mapping remains idempotent and never steals a subscription's count.
+	if len(mappingSrcs) > 0 {
+		c.leaf.msrcs = make(map[string]struct{}, len(mappingSrcs))
+		for _, src := range mappingSrcs {
+			c.leaf.msrcs[src] = struct{}{}
+		}
 	}
 	// If we have gateways enabled we need to make sure the other side sends us responses
 	// that have been augmented from the original subscription.
@@ -2951,13 +2967,21 @@ func (c *client) forceAddToSmap(subj string) {
 	if c.leaf.smap == nil {
 		return
 	}
-	n := c.leaf.smap[subj]
-	if n != 0 {
+	if c.leaf.msrcs == nil {
+		c.leaf.msrcs = make(map[string]struct{})
+	}
+	if _, ok := c.leaf.msrcs[subj]; ok {
 		return
 	}
-	// Place into the map since it was not there.
-	c.leaf.smap[subj] = 1
-	c.sendLeafNodeSubUpdate(subj, 1)
+	c.leaf.msrcs[subj] = struct{}{}
+	n := c.leaf.smap[subj]
+	c.leaf.smap[subj] = n + 1
+	// Only announce the subject when it was not already advertised for a
+	// subscription/import; a duplicate LS+ would make the remote count the
+	// same plain subscription twice and later leave stale downstream interest.
+	if n == 0 {
+		c.sendLeafNodeSubUpdate(subj, 1)
+	}
 }
 
 // Used to force remove a subject from the subject map.
@@ -2968,6 +2992,10 @@ func (c *client) forceRemoveFromSmap(subj string) {
 	if c.leaf.smap == nil {
 		return
 	}
+	if _, ok := c.leaf.msrcs[subj]; !ok {
+		return
+	}
+	delete(c.leaf.msrcs, subj)
 	n := c.leaf.smap[subj]
 	if n == 0 {
 		return
