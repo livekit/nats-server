@@ -35,11 +35,25 @@ const mappedImportRtrRaceConf = `
 	}
 `
 
-// A mapped stream import has a reverse subject transform that addShadowSub
-// builds lazily (streamImport.rtr) with no account lock held. Concurrent
-// subscribes in the importing account race on that field.
-func TestMappedStreamImportReverseTransformRace(t *testing.T) {
-	s, _ := RunServerWithConfig(createConfFile(t, []byte(mappedImportRtrRaceConf)))
+const prefixImportRtrRaceConf = `
+	port: -1
+	accounts {
+		EA {
+			users: [{user: a, password: p}]
+			exports: [{stream: "foo.>"}]
+		}
+		IB {
+			users: [{user: b, password: p}]
+			imports: [{stream: {account: EA, subject: "foo.>"}, prefix: "imp"}]
+		}
+	}
+`
+
+// runConcurrentImportSubs starts n clients in the importing account and has
+// them subscribe concurrently to the mapped subject.
+func runConcurrentImportSubs(t *testing.T, conf, subjFmt string) {
+	t.Helper()
+	s, _ := RunServerWithConfig(createConfFile(t, []byte(conf)))
 	defer s.Shutdown()
 
 	const n = 8
@@ -60,7 +74,7 @@ func TestMappedStreamImportReverseTransformRace(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			if _, err := ncs[i].SubscribeSync(fmt.Sprintf("bar.%d", i)); err != nil {
+			if _, err := ncs[i].SubscribeSync(fmt.Sprintf(subjFmt, i)); err != nil {
 				t.Errorf("Error subscribing: %v", err)
 				return
 			}
@@ -73,17 +87,18 @@ func TestMappedStreamImportReverseTransformRace(t *testing.T) {
 	wg.Wait()
 }
 
-// Control: the same mapped import with serialized subscribes must be clean
-// under -race.
-func TestMappedStreamImportReverseTransformSerial(t *testing.T) {
-	s, _ := RunServerWithConfig(createConfFile(t, []byte(mappedImportRtrRaceConf)))
+// runSerialImportSubs is the control: the same subject shape and client count,
+// but subscribes are serialized.
+func runSerialImportSubs(t *testing.T, conf, subjFmt string) {
+	t.Helper()
+	s, _ := RunServerWithConfig(createConfFile(t, []byte(conf)))
 	defer s.Shutdown()
 
 	const n = 8
 	ncs := make([]*nats.Conn, 0, n)
 	for i := 0; i < n; i++ {
 		nc := natsConnect(t, s.ClientURL(), nats.UserInfo("b", "p"))
-		if _, err := nc.SubscribeSync(fmt.Sprintf("bar.%d", i)); err != nil {
+		if _, err := nc.SubscribeSync(fmt.Sprintf(subjFmt, i)); err != nil {
 			t.Fatalf("Error subscribing: %v", err)
 		}
 		if err := nc.Flush(); err != nil {
@@ -94,4 +109,27 @@ func TestMappedStreamImportReverseTransformSerial(t *testing.T) {
 	for _, nc := range ncs {
 		nc.Close()
 	}
+}
+
+// A mapped stream import has a reverse subject transform that addShadowSub
+// builds lazily (streamImport.rtr) with no account lock held. Concurrent
+// subscribes in the importing account race on that field.
+func TestMappedStreamImportReverseTransformRace(t *testing.T) {
+	runConcurrentImportSubs(t, mappedImportRtrRaceConf, "bar.%d")
+}
+
+// Same race through the `prefix` import form, which builds the same transform.
+func TestPrefixStreamImportReverseTransformRace(t *testing.T) {
+	runConcurrentImportSubs(t, prefixImportRtrRaceConf, "imp.foo.%d")
+}
+
+// Control: the same mapped import with serialized subscribes must be clean
+// under -race.
+func TestMappedStreamImportReverseTransformSerial(t *testing.T) {
+	runSerialImportSubs(t, mappedImportRtrRaceConf, "bar.%d")
+}
+
+// Control: same for the prefix form.
+func TestPrefixStreamImportReverseTransformSerial(t *testing.T) {
+	runSerialImportSubs(t, prefixImportRtrRaceConf, "imp.foo.%d")
 }
