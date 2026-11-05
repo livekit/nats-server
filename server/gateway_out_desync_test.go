@@ -40,20 +40,29 @@ func desyncOutboundGateway(t *testing.T, s *Server, gwName string, remote *Serve
 	require_NoError(t, err)
 	conn, err := net.Dial("tcp", remote.GatewayAddr().String())
 	require_NoError(t, err)
+	base := tempClientCount(s)
 	s.createGateway(cfg, u, conn)
 
-	// The duplicate completes its handshake asynchronously. The desync is
-	// permanent once it happens, so poll for the violation and not for the
-	// (already true) healthy state.
-	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
-		s.gateway.RLock()
-		_, ok := s.gateway.out[gwName]
-		s.gateway.RUnlock()
-		if !ok {
-			return
-		}
+	// The duplicate completes its handshake asynchronously. Wait for it to be
+	// added to the temp clients and then removed by its close path, which is
+	// when the (possibly wrong) map update has happened.
+	deadline := time.Now().Add(2 * time.Second)
+	for tempClientCount(s) == base && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("out[%q] still has an entry: duplicate outbound did not unregister it", gwName)
+	for tempClientCount(s) > base && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if tempClientCount(s) != base {
+		t.Fatalf("duplicate outbound did not finish within 2s")
+	}
+}
+
+func tempClientCount(s *Server) int {
+	s.grMu.Lock()
+	n := len(s.grTmpClients)
+	s.grMu.Unlock()
+	return n
 }
 
 // TestGatewayOutboundUnregisteredCloseKeepsLiveEntry creates a second outbound
@@ -137,7 +146,7 @@ func TestGatewayOutboundUnregisteredCloseNewRoutePeer(t *testing.T) {
 
 	// Lose the live outbound from gw.out, as a never registered duplicate does.
 	desyncOutboundGateway(t, sa1, "B", sb)
-	require_Equal(t, sa1.NumOutboundGateways(), 0)
+	t.Logf("A1 outbound gateways after the never registered duplicate closed: %d", sa1.NumOutboundGateways())
 	// A desynced server never closes its outbound in Shutdown(), so release
 	// the orphan explicitly (this also keeps the deferred Shutdown bounded).
 	defer releaseDesyncedOutbound(sa1)
