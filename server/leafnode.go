@@ -2281,6 +2281,11 @@ func (s *Server) removeLeafNodeConnection(c *client) {
 			c.leaf.tsubt.Stop()
 			c.leaf.tsubt = nil
 		}
+		// The snapshot is only meaningful while the timer is running. Clear it
+		// here so that a +1 update that arrives while this connection is still
+		// registered with the account cannot take the "counted during init"
+		// branch and call Stop() on the nil timer.
+		c.leaf.tsub = nil
 		if c.leaf.gwSub != nil {
 			s.gwLeafSubs.Remove(c.leaf.gwSub)
 			// We need to set this to nil for GC to release the connection
@@ -2916,8 +2921,10 @@ func (c *client) updateSmap(sub *subscription, delta int32, isLDS bool) {
 			delete(c.leaf.tsub, sub)
 			if len(c.leaf.tsub) == 0 {
 				c.leaf.tsub = nil
-				c.leaf.tsubt.Stop()
-				c.leaf.tsubt = nil
+				if c.leaf.tsubt != nil {
+					c.leaf.tsubt.Stop()
+					c.leaf.tsubt = nil
+				}
 			}
 			return
 		}
