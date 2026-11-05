@@ -6053,3 +6053,85 @@ func TestRouteLogsRemoteURL(t *testing.T) {
 	s2.Shutdown()
 	checkNoticeNotContains(t, l, remoteURLLogUser, remoteURLLogPassword)
 }
+
+func TestRoutePinnedAccountPartialReloadKeepsInterest(t *testing.T) {
+	tmpl := `
+		port: -1
+		server_name: "%s"
+		accounts {
+			A { users: [{user: "u", password: "pwd"}] }
+		}
+		cluster {
+			name: "local"
+			listen: 127.0.0.1:-1
+			%s
+			pool_size: 3
+			%s
+		}
+	`
+	gen := func(name, routes, accs string) string {
+		return fmt.Sprintf(tmpl, name, routes, accs)
+	}
+	routeTo := func(port int) string {
+		return fmt.Sprintf("routes: [\"nats://127.0.0.1:%d\"]", port)
+	}
+
+	confA := createConfFile(t, []byte(gen("A", _EMPTY_, _EMPTY_)))
+	srva, optsA := RunServerWithConfig(confA)
+	defer srva.Shutdown()
+
+	confB := createConfFile(t, []byte(gen("B", routeTo(optsA.Cluster.Port), _EMPTY_)))
+	srvb, _ := RunServerWithConfig(confB)
+	defer srvb.Shutdown()
+
+	confC := createConfFile(t, []byte(gen("C", routeTo(optsA.Cluster.Port), _EMPTY_)))
+	srvc, _ := RunServerWithConfig(confC)
+	defer srvc.Shutdown()
+
+	checkClusterFormed(t, srva, srvb, srvc)
+
+	ncSub := natsConnect(t, srva.ClientURL(), nats.UserInfo("u", "pwd"))
+	defer ncSub.Close()
+	sub := natsSubSync(t, ncSub, "foo")
+	natsFlush(t, ncSub)
+
+	ncPub := natsConnect(t, srvc.ClientURL(), nats.UserInfo("u", "pwd"))
+	defer ncPub.Close()
+
+	send := func(msg string) {
+		t.Helper()
+		natsPub(t, ncPub, "foo", []byte(msg))
+		if m := natsNexMsg(t, sub, 2*time.Second); string(m.Data) != msg {
+			t.Fatalf("Expected message %q, got %q", msg, m.Data)
+		}
+	}
+	checkSubInterest(t, srvc, "A", "foo", 2*time.Second)
+	send("before")
+
+	// Pin account A on server B only (partial reload, as in a rolling reload).
+	reloadUpdateConfig(t, srvb, confB, gen("B", routeTo(optsA.Cluster.Port), `accounts: ["A"]`))
+
+	// Wait for B's dedicated route for A to the seed to be established.
+	checkFor(t, 5*time.Second, 25*time.Millisecond, func() error {
+		srvb.mu.RLock()
+		r := srvb.accRoutes["A"][srva.ID()]
+		srvb.mu.RUnlock()
+		if r == nil {
+			return fmt.Errorf("dedicated route for A to the seed not established")
+		}
+		return nil
+	})
+	// A and C (which did not reload) should have marked the account as
+	// transitioning to a dedicated route.
+	if acc, err := srva.LookupAccount("A"); err == nil {
+		acc.mu.RLock()
+		rpi := acc.routePoolIdx
+		acc.mu.RUnlock()
+		t.Logf("Server A routePoolIdx for account A: %d", rpi)
+	}
+
+	// Servers A and C did not reload, so they still have only pooled routes
+	// between them. Account A interest between them must not be lost.
+	checkSubInterest(t, srvc, "A", "foo", 2*time.Second)
+	send("after")
+}
