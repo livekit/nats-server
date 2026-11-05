@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/nats-io/jwt/v2"
+	srvlog "github.com/nats-io/nats-server/v2/logger"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 )
@@ -6083,8 +6084,13 @@ func techB1PoolConf(name, routes string, pool int, pinned string) string {
 	`, name, routes, ps, accs)
 }
 
-// techB1RouteLens reports, and returns, the per-remote route pool slice
-// lengths on a server, keyed by the remote's route ID.
+// techB1Log turns on a stderr logger so the TECHB1 Noticef line naming the
+// server that handles a per-account route INFO is visible in the test output.
+func techB1Log(s *Server) {
+	s.SetLogger(srvlog.NewStdLogger(false, false, false, false, true), false, false)
+}
+
+// techB1RouteLens reports and returns the per-remote route pool slice lengths.
 func techB1RouteLens(t *testing.T, s *Server, label string) map[string]int {
 	t.Helper()
 	s.mu.RLock()
@@ -6104,11 +6110,9 @@ func techB1RouteLens(t *testing.T, s *Server, label string) map[string]int {
 	return lens
 }
 
-// techB1WaitRemotes waits until a server has n remotes and returns the slice
-// lengths.
+// techB1WaitRemotes waits until a server has n remotes.
 func techB1WaitRemotes(t *testing.T, s *Server, n int) map[string]int {
 	t.Helper()
-	var lens map[string]int
 	checkFor(t, 10*time.Second, 25*time.Millisecond, func() error {
 		s.mu.RLock()
 		got := len(s.routes)
@@ -6118,8 +6122,43 @@ func techB1WaitRemotes(t *testing.T, s *Server, n int) map[string]int {
 		}
 		return nil
 	})
-	lens = techB1RouteLens(t, s, s.Name())
-	return lens
+	return techB1RouteLens(t, s, s.Name())
+}
+
+// techB1StartMixed starts S1 (seed, pool p1), S2 (pool p2, routes S1), S3
+// (pool p3, routes S1) and returns them with S2's config file.
+func techB1StartMixed(t *testing.T, p1, p2, p3 int) (s1, s2, s3 *Server, conf2 string) {
+	t.Helper()
+	conf1 := createConfFile(t, []byte(techB1PoolConf("S1", _EMPTY_, p1, _EMPTY_)))
+	var o1 *Options
+	s1, o1 = RunServerWithConfig(conf1)
+	techB1Log(s1)
+	t.Cleanup(s1.Shutdown)
+	routeTo1 := fmt.Sprintf(`routes: ["nats://127.0.0.1:%d"]`, o1.Cluster.Port)
+
+	conf2 = createConfFile(t, []byte(techB1PoolConf("S2", routeTo1, p2, _EMPTY_)))
+	s2, _ = RunServerWithConfig(conf2)
+	techB1Log(s2)
+	t.Cleanup(s2.Shutdown)
+
+	conf3 := createConfFile(t, []byte(techB1PoolConf("S3", routeTo1, p3, _EMPTY_)))
+	s3, _ = RunServerWithConfig(conf3)
+	techB1Log(s3)
+	t.Cleanup(s3.Shutdown)
+	return s1, s2, s3, conf2
+}
+
+func techB1SliceHistogram(t *testing.T, lens map[string]int) (twos, fives int) {
+	t.Helper()
+	for _, l := range lens {
+		switch l {
+		case 2:
+			twos++
+		case 5:
+			fives++
+		}
+	}
+	return twos, fives
 }
 
 // TestTechB1RoutePoolIdxCrossRemotePanic is the candidate's primary repro:
@@ -6127,45 +6166,300 @@ func techB1WaitRemotes(t *testing.T, s *Server, n int) map[string]int {
 // with account A pinned. computeRoutePoolIdx(5, "A") == 2, and S1 applies
 // index 2 to every remote's slice, including its 2-entry slice for S3.
 func TestTechB1RoutePoolIdxCrossRemotePanic(t *testing.T) {
-	o1, o2, o3 := DefaultOptions(), DefaultOptions(), DefaultOptions()
-	o1.ServerName, o2.ServerName, o3.ServerName = "S1", "S2", "S3"
-
-	conf1 := createConfFile(t, []byte(techB1PoolConf("S1", _EMPTY_, 2, _EMPTY_)))
-	s1, o1 := RunServerWithConfig(conf1)
-	defer s1.Shutdown()
-	routeTo1 := fmt.Sprintf(`routes: ["nats://127.0.0.1:%d"]`, o1.Cluster.Port)
-
-	conf2 := createConfFile(t, []byte(techB1PoolConf("S2", routeTo1, 5, _EMPTY_)))
-	s2, _ := RunServerWithConfig(conf2)
-	defer s2.Shutdown()
-
-	conf3 := createConfFile(t, []byte(techB1PoolConf("S3", routeTo1, 2, _EMPTY_)))
-	s3, _ := RunServerWithConfig(conf3)
-	defer s3.Shutdown()
-
-	_ = o2
-	_ = o3
-
+	s1, s2, s3, conf2 := techB1StartMixed(t, 2, 5, 2)
 	lens := techB1WaitRemotes(t, s1, 2)
-	two, five := 0, 0
-	for _, l := range lens {
-		switch l {
-		case 2:
-			two++
-		case 5:
-			five++
-		}
-	}
-	require_Equal(t, two, 1)
-	require_Equal(t, five, 1)
-	// Sanity: the account index that S2 will advertise.
+	twos, fives := techB1SliceHistogram(t, lens)
+	require_Equal(t, twos, 1)
+	require_Equal(t, fives, 1)
 	require_Equal(t, computeRoutePoolIdx(5, "A"), 2)
+	_ = s3
 
-	reloadUpdateConfig(t, s2, conf2, techB1PoolConf("S2", routeTo1, 5, `["A"]`))
+	reloadUpdateConfig(t, s2, conf2, techB1PoolConf("S2",
+		fmt.Sprintf(`routes: ["nats://127.0.0.1:%d"]`, s1.opts.Cluster.Port), 5, `["A"]`))
 
 	// On pinned main the server panics in its route read loop; if it survives,
 	// this assertion fails instead.
 	time.Sleep(500 * time.Millisecond)
 	require_True(t, s1.NumRoutes() > 0)
 	require_True(t, s3.NumRoutes() > 0)
+}
+
+// TestTechB1RoutePoolIdxAccountB repeats the primary repro with account B
+// (computeRoutePoolIdx(5, "B") == 4) to show the trigger is the index
+// arithmetic, not the account name.
+func TestTechB1RoutePoolIdxAccountB(t *testing.T) {
+	s1, s2, s3, conf2 := techB1StartMixed(t, 2, 5, 2)
+	lens := techB1WaitRemotes(t, s1, 2)
+	twos, fives := techB1SliceHistogram(t, lens)
+	require_Equal(t, twos, 1)
+	require_Equal(t, fives, 1)
+	require_Equal(t, computeRoutePoolIdx(5, "B"), 4)
+	_ = s3
+	reloadUpdateConfig(t, s2, conf2, techB1PoolConf("S2",
+		fmt.Sprintf(`routes: ["nats://127.0.0.1:%d"]`, s1.opts.Cluster.Port), 5, `["B"]`))
+	time.Sleep(500 * time.Millisecond)
+	require_True(t, s1.NumRoutes() > 0)
+}
+
+// TestTechB1RoutePoolIdxUniformPool5Control: same reload with every server at
+// pool 5, so every slice has the length the index assumes.
+func TestTechB1RoutePoolIdxUniformPool5Control(t *testing.T) {
+	s1, s2, s3, conf2 := techB1StartMixed(t, 5, 5, 5)
+	lens := techB1WaitRemotes(t, s1, 2)
+	for _, l := range lens {
+		require_Equal(t, l, 5)
+	}
+	require_Equal(t, computeRoutePoolIdx(5, "A"), 2)
+	before := s1.NumRoutes()
+	reloadUpdateConfig(t, s2, conf2, techB1PoolConf("S2",
+		fmt.Sprintf(`routes: ["nats://127.0.0.1:%d"]`, s1.opts.Cluster.Port), 5, `["A"]`))
+	time.Sleep(500 * time.Millisecond)
+	require_Equal(t, s1.NumRoutes(), before)
+	require_True(t, s3.NumRoutes() > 0)
+}
+
+// TestTechB1RoutePoolIdxDefaultPoolControl: the default pool size (3) on all
+// three servers, same pinned-account reload.
+func TestTechB1RoutePoolIdxDefaultPoolControl(t *testing.T) {
+	s1, s2, s3, conf2 := techB1StartMixed(t, 0, 0, 0)
+	lens := techB1WaitRemotes(t, s1, 2)
+	for _, l := range lens {
+		require_Equal(t, l, 3)
+	}
+	before := s1.NumRoutes()
+	reloadUpdateConfig(t, s2, conf2, techB1PoolConf("S2",
+		fmt.Sprintf(`routes: ["nats://127.0.0.1:%d"]`, s1.opts.Cluster.Port), 0, `["A"]`))
+	time.Sleep(500 * time.Millisecond)
+	require_Equal(t, s1.NumRoutes(), before)
+	require_True(t, s3.NumRoutes() > 0)
+}
+
+// TestTechB1RoutePoolIdxUnpinnedReloadControl: mixed pools, reload S2 with no
+// account pinned, so no per-account INFO is sent.
+func TestTechB1RoutePoolIdxUnpinnedReloadControl(t *testing.T) {
+	s1, s2, s3, conf2 := techB1StartMixed(t, 2, 5, 2)
+	techB1WaitRemotes(t, s1, 2)
+	before := s1.NumRoutes()
+	reloadUpdateConfig(t, s2, conf2, techB1PoolConf("S2",
+		fmt.Sprintf(`routes: ["nats://127.0.0.1:%d"]`, s1.opts.Cluster.Port), 5, _EMPTY_))
+	time.Sleep(500 * time.Millisecond)
+	require_Equal(t, s1.NumRoutes(), before)
+	require_True(t, s3.NumRoutes() > 0)
+}
+
+// TestTechB1RoutePoolIdxPoolSizeReloadOnly: path 2. All three start at pool 2;
+// only S2 reloads with pool_size 5 and no pinned account. Record how S1's
+// per-remote slices change.
+func TestTechB1RoutePoolIdxPoolSizeReloadOnly(t *testing.T) {
+	s1, s2, s3, conf2 := techB1StartMixed(t, 2, 2, 2)
+	lens := techB1WaitRemotes(t, s1, 2)
+	for _, l := range lens {
+		require_Equal(t, l, 2)
+	}
+	reloadUpdateConfig(t, s2, conf2, techB1PoolConf("S2",
+		fmt.Sprintf(`routes: ["nats://127.0.0.1:%d"]`, s1.opts.Cluster.Port), 5, _EMPTY_))
+	// S2 re-solicits 5 connections; S1's slice for S2 must grow to 5.
+	checkFor(t, 10*time.Second, 25*time.Millisecond, func() error {
+		lens := techB1RouteLens(t, s1, "S1-after")
+		five, two := 0, 0
+		for _, l := range lens {
+			switch l {
+			case 5:
+				five++
+			case 2:
+				two++
+			}
+		}
+		if five != 1 || two != 1 {
+			return fmt.Errorf("want slices 5 and 2, got %v", lens)
+		}
+		return nil
+	})
+	time.Sleep(300 * time.Millisecond)
+	require_True(t, s1.NumRoutes() > 0)
+	require_True(t, s3.NumRoutes() > 0)
+}
+
+// TestTechB1RoutePoolIdxSymmetryReloadThird reloads the far end: S1 seed pool
+// 2, S2 pool 2 routed to S1, S3 pool 5 routed to S2. S3's account INFO goes
+// over its 5 connections to S2, so S2 applies index 2 to its 2-entry slice for
+// S1 (and S1, which S3 also solicits, to its 2-entry slice for S2).
+func TestTechB1RoutePoolIdxSymmetryReloadThird(t *testing.T) {
+	conf1 := createConfFile(t, []byte(techB1PoolConf("S1", _EMPTY_, 2, _EMPTY_)))
+	s1, o1 := RunServerWithConfig(conf1)
+	techB1Log(s1)
+	defer s1.Shutdown()
+	routeTo1 := fmt.Sprintf(`routes: ["nats://127.0.0.1:%d"]`, o1.Cluster.Port)
+
+	conf2 := createConfFile(t, []byte(techB1PoolConf("S2", routeTo1, 2, _EMPTY_)))
+	s2, o2 := RunServerWithConfig(conf2)
+	techB1Log(s2)
+	defer s2.Shutdown()
+
+	conf3 := createConfFile(t, []byte(techB1PoolConf("S3",
+		fmt.Sprintf(`routes: ["nats://127.0.0.1:%d"]`, o2.Cluster.Port), 5, _EMPTY_)))
+	s3, _ := RunServerWithConfig(conf3)
+	techB1Log(s3)
+	defer s3.Shutdown()
+
+	techB1WaitRemotes(t, s1, 1)
+	techB1WaitRemotes(t, s2, 2)
+	require_Equal(t, computeRoutePoolIdx(5, "A"), 2)
+
+	reloadUpdateConfig(t, s3, conf3, techB1PoolConf("S3",
+		fmt.Sprintf(`routes: ["nats://127.0.0.1:%d"]`, o2.Cluster.Port), 5, `["A"]`))
+	time.Sleep(500 * time.Millisecond)
+	require_True(t, s1.NumRoutes() > 0)
+	require_True(t, s2.NumRoutes() > 0)
+}
+
+// Ported corrected control for candidate 0001: mixed topology with all servers
+// at pool 5 and a pinned-account reload; no panic and every slice stays 5 wide.
+func TestRoutePoolIdxUniformPoolControlPorted(t *testing.T) {
+	tmpl := `
+		port: -1
+		server_name: "%s"
+		accounts {
+			A { users: [{user: "A", password: "pwd"}] }
+		}
+		cluster {
+			port: -1
+			name: "local"
+			%s
+			pool_size: %d
+		}
+		no_sys_acc: true
+	`
+	gen := func(name, routes string, pool int) string {
+		return fmt.Sprintf(tmpl, name, routes, pool)
+	}
+	conf1 := createConfFile(t, []byte(gen("S1", _EMPTY_, 5)))
+	s1, o1 := RunServerWithConfig(conf1)
+	defer s1.Shutdown()
+	routeTo := func(port int) string {
+		return fmt.Sprintf("routes: [\"nats://127.0.0.1:%d\"]", port)
+	}
+	conf2 := createConfFile(t, []byte(gen("S2", routeTo(o1.Cluster.Port), 5)))
+	s2, _ := RunServerWithConfig(conf2)
+	defer s2.Shutdown()
+	conf3 := createConfFile(t, []byte(gen("S3", routeTo(o1.Cluster.Port), 5)))
+	s3, _ := RunServerWithConfig(conf3)
+	defer s3.Shutdown()
+
+	checkFor(t, 10*time.Second, 25*time.Millisecond, func() error {
+		s1.mu.RLock()
+		defer s1.mu.RUnlock()
+		if len(s1.routes) != 2 {
+			return fmt.Errorf("expected 2 remotes on S1, got %d", len(s1.routes))
+		}
+		for _, conns := range s1.routes {
+			if len(conns) != 5 {
+				return fmt.Errorf("expected slice len 5, got %d", len(conns))
+			}
+		}
+		return nil
+	})
+
+	pinnedTmpl := `
+		port: -1
+		server_name: "S2"
+		accounts {
+			A { users: [{user: "A", password: "pwd"}] }
+		}
+		cluster {
+			port: -1
+			name: "local"
+			%s
+			pool_size: 5
+			accounts: ["A"]
+		}
+		no_sys_acc: true
+	`
+	reloadUpdateConfig(t, s2, conf2, fmt.Sprintf(pinnedTmpl, routeTo(o1.Cluster.Port)))
+
+	checkFor(t, 5*time.Second, 25*time.Millisecond, func() error {
+		s2.mu.RLock()
+		r := s2.accRoutes["A"][s1.ID()]
+		s2.mu.RUnlock()
+		if r == nil {
+			return fmt.Errorf("dedicated route for A not established")
+		}
+		return nil
+	})
+
+	s1.mu.RLock()
+	for id, conns := range s1.routes {
+		require_Equal(t, len(conns), 5)
+		_ = id
+	}
+	s1.mu.RUnlock()
+	require_True(t, s1.NumRoutes() > 0)
+	require_True(t, s3.NumRoutes() > 0)
+}
+
+// Ported symmetry repro: the far end reloads. S3 (pool 5) sends the
+// per-account INFO over its 5-wide slice to S2 (pool 2), and S2 applies index
+// 2 to its 2-wide slice for S1 -> panic. The tech's version waited for S1 to
+// have exactly 1 remote, which does not hold (gossip makes the mesh full).
+func TestRoutePoolIdxSymmetryPorted(t *testing.T) {
+	tmpl := `
+		port: -1
+		server_name: "%s"
+		accounts {
+			A { users: [{user: "A", password: "pwd"}] }
+		}
+		cluster {
+			port: -1
+			name: "local"
+			%s
+			pool_size: %d
+		}
+		no_sys_acc: true
+	`
+	gen := func(name, routes string, pool int) string {
+		return fmt.Sprintf(tmpl, name, routes, pool)
+	}
+	conf1 := createConfFile(t, []byte(gen("S1", _EMPTY_, 2)))
+	s1, o1 := RunServerWithConfig(conf1)
+	defer s1.Shutdown()
+	routeTo := func(port int) string {
+		return fmt.Sprintf("routes: [\"nats://127.0.0.1:%d\"]", port)
+	}
+	conf2 := createConfFile(t, []byte(gen("S2", routeTo(o1.Cluster.Port), 2)))
+	s2, o2 := RunServerWithConfig(conf2)
+	defer s2.Shutdown()
+	conf3 := createConfFile(t, []byte(gen("S3", routeTo(o2.Cluster.Port), 5)))
+	s3, _ := RunServerWithConfig(conf3)
+	defer s3.Shutdown()
+
+	checkFor(t, 10*time.Second, 25*time.Millisecond, func() error {
+		s2.mu.RLock()
+		defer s2.mu.RUnlock()
+		if len(s2.routes) != 2 {
+			return fmt.Errorf("expected 2 remotes on S2, got %d", len(s2.routes))
+		}
+		return nil
+	})
+	require_Equal(t, computeRoutePoolIdx(5, "A"), 2)
+
+	pinned := `
+		port: -1
+		server_name: "S3"
+		accounts {
+			A { users: [{user: "A", password: "pwd"}] }
+		}
+		cluster {
+			port: -1
+			name: "local"
+			%s
+			pool_size: 5
+			accounts: ["A"]
+		}
+		no_sys_acc: true
+	`
+	reloadUpdateConfig(t, s3, conf3, fmt.Sprintf(pinned, routeTo(o2.Cluster.Port)))
+
+	time.Sleep(500 * time.Millisecond)
+	require_True(t, s1.NumRoutes() > 0)
+	require_True(t, s2.NumRoutes() > 0)
 }
