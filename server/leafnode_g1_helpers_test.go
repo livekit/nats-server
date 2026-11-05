@@ -63,3 +63,20 @@ func leafSmapValue(lc *client, key string) (int64, bool) {
 	}
 	return lc.leaf.smap[key], true
 }
+
+// hubTotalQW returns the sum of the queue weights this server stores for all
+// remote subscriptions announced with the given "subject queue" key.
+func hubTotalQW(t *testing.T, s *Server, key string) int32 {
+	t.Helper()
+	var total int32
+	s.mu.RLock()
+	for _, lc := range s.leafs {
+		lc.mu.Lock()
+		if sub := lc.subs[key]; sub != nil {
+			total += atomic.LoadInt32(&sub.qw)
+		}
+		lc.mu.Unlock()
+	}
+	s.mu.RUnlock()
+	return total
+}

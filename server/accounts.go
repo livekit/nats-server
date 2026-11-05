@@ -86,6 +86,15 @@ type Account struct {
 	hasMapped    atomic.Bool
 	lmu          sync.RWMutex
 	lleafs       []*client
+	// Serializes snapshotting of this account's subscription interest for a
+	// new leaf connection (initLeafNodeSmapAndSendSubs takes the write lock)
+	// against interest removals, which both change the sublist and announce
+	// the change to the leaf connections (they take the read lock). Without
+	// it, a removal's -delta can be delivered after a leaf's init snapshot
+	// even though that snapshot already saw the sublist without the removed
+	// subscription, so the delta is applied to a count the snapshot never
+	// included and can send an LS- for interest that is still live.
+	smapMu       sync.RWMutex
 	leafClusters map[string]uint64
 	imports      importMap
 	exports      exportMap
