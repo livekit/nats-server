@@ -6053,3 +6053,71 @@ func TestRouteLogsRemoteURL(t *testing.T) {
 	s2.Shutdown()
 	checkNoticeNotContains(t, l, remoteURLLogUser, remoteURLLogPassword)
 }
+
+func TestRoutePoolIdxAcrossRemotesOnPinnedAccountReload(t *testing.T) {
+	tmpl := `
+		port: -1
+		server_name: "%s"
+		accounts {
+			A { users: [{user: "A", password: "pwd"}] }
+			B { users: [{user: "B", password: "pwd"}] }
+		}
+		cluster {
+			port: -1
+			name: "local"
+			%s
+			pool_size: %d
+			%s
+		}
+		no_sys_acc: true
+	`
+	routeTo := func(port int) string {
+		return fmt.Sprintf("routes: [\"nats://127.0.0.1:%d\"]", port)
+	}
+	gen := func(name, routes string, pool int, accs string) string {
+		return fmt.Sprintf(tmpl, name, routes, pool, accs)
+	}
+
+	conf1 := createConfFile(t, []byte(gen("S1", _EMPTY_, 2, _EMPTY_)))
+	s1, o1 := RunServerWithConfig(conf1)
+	defer s1.Shutdown()
+
+	conf2 := createConfFile(t, []byte(gen("S2", routeTo(o1.Cluster.Port), 5, _EMPTY_)))
+	s2, _ := RunServerWithConfig(conf2)
+	defer s2.Shutdown()
+
+	conf3 := createConfFile(t, []byte(gen("S3", routeTo(o1.Cluster.Port), 2, _EMPTY_)))
+	s3, _ := RunServerWithConfig(conf3)
+	defer s3.Shutdown()
+
+	// Wait for S1 to see two remotes, with pool size 5 (S2) and 2 (S3).
+	checkFor(t, 10*time.Second, 25*time.Millisecond, func() error {
+		s1.mu.RLock()
+		defer s1.mu.RUnlock()
+		if len(s1.routes) != 2 {
+			return fmt.Errorf("expected 2 remotes, got %d", len(s1.routes))
+		}
+		var l2, l5 int
+		for _, conns := range s1.routes {
+			switch len(conns) {
+			case 2:
+				l2++
+			case 5:
+				l5++
+			}
+		}
+		if l2 != 1 || l5 != 1 {
+			return fmt.Errorf("expected one remote with pool size 2 and one with 5, got %d and %d", l2, l5)
+		}
+		return nil
+	})
+
+	// Reload S2 with account "A" pinned. computeRoutePoolIdx(5, "A") == 2, so
+	// S1 will use index 2 in every remote's connections slice, but its remote
+	// S3 only has 2 connections.
+	reloadUpdateConfig(t, s2, conf2, gen("S2", routeTo(o1.Cluster.Port), 5, `accounts: ["A"]`))
+
+	// Should not have panicked in S1's route read loop.
+	time.Sleep(500 * time.Millisecond)
+	require_True(t, s1.NumRoutes() > 0)
+}
