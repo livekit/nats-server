@@ -73,7 +73,11 @@ func importClient(a *Account) *client {
 	var found *client
 	a.mu.RLock()
 	for c := range a.clients {
-		if c.kind == CLIENT && !c.isClosed() {
+		c.mu.RLock()
+		closed := c.isClosed()
+		kind := c.kind
+		c.mu.RUnlock()
+		if kind == CLIENT && !closed {
 			found = c
 		}
 	}
@@ -180,8 +184,12 @@ func TestStreamImportAutoUnsubscribeShadowReloadCorruption(t *testing.T) {
 		if len(subs) != 1 {
 			return fmt.Errorf("EXP has %d matching subs, want 1", len(subs))
 		}
-		if subs[0].max != 1 {
-			return fmt.Errorf("shadow not refreshed with max=1 (max=%d)", subs[0].max)
+		sub := subs[0]
+		sub.client.mu.RLock()
+		max := sub.max
+		sub.client.mu.RUnlock()
+		if max != 1 {
+			return fmt.Errorf("shadow not refreshed with max=1 (max=%d)", max)
 		}
 		return nil
 	})
