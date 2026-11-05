@@ -17,8 +17,6 @@ import (
 	"fmt"
 	"testing"
 	"time"
-
-	"github.com/nats-io/nats.go"
 )
 
 const acctShadowInterestConf = `
