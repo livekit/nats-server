@@ -139,7 +139,10 @@ func TestStreamImportShadowAutoUnsubCleanup(t *testing.T) {
 		subc = nil
 		impAcc.mu.RLock()
 		for c := range impAcc.clients {
-			if c.kind == CLIENT && !c.isClosed() {
+			c.mu.RLock()
+			closed, kind := c.isClosed(), c.kind
+			c.mu.RUnlock()
+			if kind == CLIENT && !closed {
 				subc = c
 			}
 		}
