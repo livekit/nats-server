@@ -205,8 +205,8 @@ func TestStreamImportReloadWithdrawsPeerInterest(t *testing.T) {
 	defer s2.Shutdown()
 
 	checkFor(t, 3*time.Second, 15*time.Millisecond, func() error {
-		if s1.numRoutes() == 0 || s2.numRoutes() == 0 {
-			return fmt.Errorf("routes not up: s1=%d s2=%d", s1.numRoutes(), s2.numRoutes())
+		if s1.NumRoutes() == 0 || s2.NumRoutes() == 0 {
+			return fmt.Errorf("routes not up: s1=%d s2=%d", s1.NumRoutes(), s2.NumRoutes())
 		}
 		return nil
 	})
