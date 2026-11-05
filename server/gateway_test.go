@@ -8078,3 +8078,82 @@ func TestGatewayLogsRemoteURL(t *testing.T) {
 	s1.Shutdown()
 	checkNoticeNotContains(t, l, remoteURLLogUser, remoteURLLogPassword)
 }
+
+// When a gateway connection closes concurrently with the processing of its
+// INFO protocol, closeConnection() can run before the connection has been
+// registered in s.gateway.in/out, so it finds nothing to remove there. The
+// registration that follows then leaves a closed client registered forever,
+// inflating the gateway counts (Gatewayz) and retaining the client. The
+// leafnode accept path has the same recheck; the gateway paths did not.
+func TestGatewayInboundClosedDuringConnectNotLeaked(t *testing.T) {
+	opts := DefaultOptions()
+	opts.ServerName = "A"
+	opts.Cluster.Name = "A"
+	opts.Gateway = GatewayOpts{Name: "A", Host: "127.0.0.1", Port: -1}
+	s := RunServer(opts)
+	defer s.Shutdown()
+
+	_, serverConn := net.Pipe()
+	defer serverConn.Close()
+
+	c := &client{
+		kind: GATEWAY,
+		srv:  s,
+		nc:   serverConn,
+		gw:   &gateway{insim: make(map[string]*insie)},
+		in:   readCache{},
+		subs: make(map[string]*subscription),
+	}
+	c.cid = 123456789
+
+	// Simulate the connection having closed (for instance the gateway auth
+	// timer firing) right before the INFO is processed.
+	c.mu.Lock()
+	c.flags.set(closeConnection)
+	c.mu.Unlock()
+
+	c.processGatewayInfo(&Info{Gateway: "B", ID: "remote", Name: "remote"})
+
+	s.gateway.RLock()
+	n := len(s.gateway.in)
+	_, present := s.gateway.in[c.cid]
+	s.gateway.RUnlock()
+	require_False(t, present)
+	require_Equal(t, n, 0)
+}
+
+func TestGatewayOutboundClosedDuringConnectNotLeaked(t *testing.T) {
+	opts := DefaultOptions()
+	opts.ServerName = "A"
+	opts.Cluster.Name = "A"
+	opts.Gateway = GatewayOpts{Name: "A", Host: "127.0.0.1", Port: -1}
+	s := RunServer(opts)
+	defer s.Shutdown()
+
+	_, serverConn := net.Pipe()
+	defer serverConn.Close()
+
+	cfg := &gatewayCfg{RemoteGatewayOpts: &RemoteGatewayOpts{Name: "B"}}
+	c := &client{
+		kind: GATEWAY,
+		srv:  s,
+		nc:   serverConn,
+		gw:   &gateway{outbound: true, name: "B", cfg: cfg, outsim: &sync.Map{}, insim: make(map[string]*insie), connectURL: &url.URL{Scheme: "nats", Host: "127.0.0.1:7222"}},
+		in:   readCache{},
+		subs: make(map[string]*subscription),
+	}
+	c.cid = 123456790
+
+	c.mu.Lock()
+	c.flags.set(closeConnection)
+	c.mu.Unlock()
+
+	c.processGatewayInfo(&Info{Gateway: "B", ID: "remote", Name: "remote"})
+
+	s.gateway.RLock()
+	n := len(s.gateway.out)
+	_, present := s.gateway.out["B"]
+	s.gateway.RUnlock()
+	require_False(t, present)
+	require_Equal(t, n, 0)
+}
