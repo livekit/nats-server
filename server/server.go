@@ -2292,6 +2292,15 @@ func (s *Server) fetchAccount(name string) (*Account, error) {
 // WaitForShutdown can be used to block and wait for the server to shutdown properly if needed
 // after calling s.Shutdown()
 func (s *Server) Start() {
+	// The server cannot be restarted once Shutdown() has completed: quitCh is
+	// closed, shutdownComplete is closed and s.sys may have been torn down.
+	// Starting the subsystems again would leave the system account eventing
+	// stack and JetStream running on a server nobody can shut down anymore
+	// (Shutdown() is a one-shot CAS and becomes a no-op).
+	if s.isShuttingDown() {
+		return
+	}
+
 	s.Noticef("Starting nats-server")
 
 	gc := gitCommit
