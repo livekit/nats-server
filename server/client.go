@@ -6353,6 +6353,21 @@ func (c *client) processSubsOnConfigReload(awcsti map[string]struct{}) {
 	// Unsubscribe all that need to be removed and report back to client and logs.
 	for _, sub := range removed {
 		c.unsubscribe(acc, sub, true, true)
+		// unsubscribe only withdraws the sub's shadows; the interest the sub
+		// itself announced at SUB time has to be withdrawn here too, mirroring
+		// processUnsub.
+		c.mu.Lock()
+		kind := c.kind
+		c.mu.Unlock()
+		if acc != nil && (kind == CLIENT || kind == SYSTEM || kind == ACCOUNT || kind == JETSTREAM) {
+			srv.updateRouteSubscriptionMap(acc, sub, -1)
+			if srv.gateway.enabled {
+				srv.gatewayUpdateSubInterest(acc.Name, sub, -1)
+			}
+		}
+		if acc != nil {
+			acc.updateLeafNodes(sub, -1)
+		}
 		if len(sub.queue) > 0 {
 			c.sendErr(fmt.Sprintf("Permissions Violation for Subscription to %q using queue %q (sid %q)", sub.subject, sub.queue, sub.sid))
 			srv.Noticef("Removed sub %q using queue %q (sid %q) for %s - not authorized", sub.subject, sub.queue, sub.sid, c.getAuthUser())
